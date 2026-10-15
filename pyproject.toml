@@ -45,5 +45,5 @@ strict = true
 packages = ["sma"]
 
 [[tool.mypy.overrides]]
-module = "yaml"
+module = ["yaml", "tiktoken"]
 ignore_missing_imports = true
