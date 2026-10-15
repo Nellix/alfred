@@ -1,0 +1,1 @@
+-keep class ai.alfred.app.runtime.SemanticAccessibilityService { *; }

@@ -1,0 +1,38 @@
+{
+  "initial_state": "home",
+  "states": {
+    "home": {
+      "package": "com.example.browser", "window_id": "browser", "screen_id": "browser.home",
+      "elements": [
+        {"class": "android.widget.EditText", "content_description": "Address and search bar", "resource_id": "browser/address", "editable": true, "bounds": [40, 30, 1040, 130]},
+        {"class": "android.widget.TextView", "text": "Bookmarks", "resource_id": "browser/bookmarks", "clickable": true, "bounds": [30, 240, 500, 360]}
+      ]
+    },
+    "results": {
+      "package": "com.example.browser", "window_id": "browser", "screen_id": "browser.results",
+      "elements": [
+        {"class": "android.widget.EditText", "text": "semantic mobile agent", "resource_id": "browser/address", "editable": true, "bounds": [40, 30, 1040, 130]},
+        {"class": "android.widget.TextView", "text": "Semantic Mobile Interfaces", "resource_id": "browser/result_1", "clickable": true, "bounds": [30, 240, 1040, 400]},
+        {"class": "android.widget.ScrollView", "resource_id": "browser/results_list", "scrollable": true, "bounds": [0, 150, 1080, 1880]}
+      ]
+    },
+    "article": {
+      "package": "com.example.browser", "window_id": "browser", "screen_id": "browser.article",
+      "elements": [
+        {"class": "android.widget.Button", "content_description": "Back", "resource_id": "browser/back", "clickable": true, "bounds": [10, 30, 100, 130]},
+        {"class": "android.widget.TextView", "text": "Semantic Mobile Interfaces", "resource_id": "browser/title", "bounds": [30, 200, 1040, 340]}
+      ]
+    },
+    "deep_link": {
+      "package": "com.example.browser", "window_id": "browser", "screen_id": "browser.deep_link",
+      "elements": [
+        {"class": "android.widget.TextView", "text": "Example Domain", "resource_id": "browser/title", "bounds": [30, 200, 1040, 340]}
+      ]
+    }
+  },
+  "transitions": {
+    "home": {"input:*": "results", "deep_link:https://example.com": "deep_link"},
+    "results": {"click:browser/result_1": "article", "scroll:up": "results"},
+    "article": {"back": "results"}
+  }
+}

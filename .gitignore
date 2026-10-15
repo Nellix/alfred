@@ -1,0 +1,16 @@
+.env
+.env.cloud
+secrets/
+.venv/
+__pycache__/
+*.py[cod]
+*.db
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+runs/
+artifacts/
+android/.gradle/
+android/**/build/
+android/local.properties
+skills-registry-repo/

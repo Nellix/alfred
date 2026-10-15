@@ -1,0 +1,20 @@
+id: open_settings_search
+version: 1
+approved: true
+parameters:
+  query:
+    type: string
+    pattern: "^[A-Za-z0-9 .&_-]{1,80}$"
+steps:
+  - action: launch_app
+    package: com.android.settings
+  - action: wait_for_screen
+    screen: settings.home
+  - action: click
+    target: label:Search settings
+  - action: set_text
+    target: label:Search settings
+    value: "${query}"
+  - action: verify
+    screen: settings.search_results
+on_mismatch: stop_and_escalate

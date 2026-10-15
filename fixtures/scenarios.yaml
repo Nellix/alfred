@@ -1,0 +1,57 @@
+name: sma-offline-v1
+scenarios:
+  - id: settings-open
+    goal: Open Android Settings
+    fixture: settings/replay.json
+    state_id: launcher
+    expected_label: Settings
+  - id: settings-find-search
+    goal: Find search in Settings
+    fixture: settings/replay.json
+    state_id: settings_home
+    expected_label: Search settings
+  - id: settings-search-result
+    goal: Select Wi-Fi from results
+    fixture: settings/replay.json
+    state_id: results
+    previous_state_id: search
+    expected_label: Wi-Fi
+    expected_resource_id: settings/result_wifi
+  - id: settings-back
+    goal: Navigate backward
+    fixture: settings/replay.json
+    state_id: network
+    expected_label: Back
+  - id: settings-scroll
+    goal: Scroll network settings
+    fixture: settings/replay.json
+    state_id: network
+    expected_label: settings/network_list
+  - id: settings-recover
+    goal: Cancel an unexpected dialog
+    fixture: settings/replay.json
+    state_id: unexpected_dialog
+    expected_label: Cancel
+  - id: browser-address
+    goal: Enter a browser search
+    fixture: browser/replay.json
+    state_id: home
+    expected_label: Address and search bar
+  - id: browser-result
+    goal: Select the first search result
+    fixture: browser/replay.json
+    state_id: results
+    previous_state_id: home
+    expected_label: Semantic Mobile Interfaces
+  - id: browser-deep-link
+    goal: Open a supported deep link
+    fixture: browser/replay.json
+    state_id: deep_link
+    expected_label: Example Domain
+  - id: repeated-settings-search
+    goal: Search Settings for Wi-Fi with a learned workflow
+    fixture: settings/replay.json
+    state_id: settings_home
+    expected_label: Search settings
+    warm_skill: true
+    actions: 3

@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Alfred</string>
+    <string name="accessibility_description">Lets Alfred inspect semantic controls and perform only the actions you request. Passwords and payment controls are excluded.</string>
+</resources>
