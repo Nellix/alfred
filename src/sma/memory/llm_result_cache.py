@@ -44,6 +44,11 @@ _PRIVATE_LITERAL = re.compile(
     re.I,
 )
 _STRUCTURAL_PARAMETERS = {"channel", "provider"}
+_BLOCKED_INTENT = re.compile(
+    r"(?:^|\.)(?:send|delete|purchase|buy|pay|transfer|install|uninstall|password|"
+    r"security|factory_reset)(?:\.|$)",
+    re.I,
+)
 
 
 class PlannedSemanticAction(BaseModel):
@@ -136,7 +141,7 @@ class GeneralizedLLMResultCache:
     ) -> LearnedLLMResult:
         if outcome.status is not ActionStatus.SUCCESS or not outcome.verified:
             raise ValueError("only successfully executed and verified LLM actions can be cached")
-        safety = safety_for_intent(plan.canonical_intent)
+        safety = safety_for_planned_action(plan.canonical_intent, plan.action)
         if safety is IntentSafety.BLOCKED:
             raise ValueError("unknown or blocked intent classes cannot enter the automatic cache")
         action = self._stable_action(plan.action, before)
@@ -324,6 +329,28 @@ class GeneralizedLLMResultCache:
         if len(duplicates) != 1:
             raise ValueError("the action target label is not unique on this screen")
         return stable.model_copy(update={"target": f"label:{label}"})
+
+
+def safety_for_planned_action(
+    canonical_intent: str,
+    action: SemanticAction,
+) -> IntentSafety:
+    """Classify a verified model action from both its intent and concrete effect."""
+    configured = safety_for_intent(canonical_intent)
+    if configured is IntentSafety.BLOCKED and _BLOCKED_INTENT.search(canonical_intent):
+        return IntentSafety.BLOCKED
+    if action.action in {"click", "set_text"}:
+        return IntentSafety.CONFIRM
+    if action.action in {
+        "launch_app",
+        "open_deep_link",
+        "scroll",
+        "back",
+        "wait",
+        "stop",
+    }:
+        return configured if configured is not IntentSafety.BLOCKED else IntentSafety.LOW
+    return IntentSafety.BLOCKED
 
 
 def _normalize(goal: str) -> str:

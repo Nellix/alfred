@@ -22,6 +22,11 @@
         android:theme="@style/Theme.Alfred"
         android:usesCleartextTraffic="true">
         <activity
+            android:name=".ui.ConfirmationActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/Theme.Alfred.Confirmation" />
+        <activity
             android:name=".ui.PrivacyActivity"
             android:exported="false" />
         <activity

@@ -1,7 +1,7 @@
 # Documentation
 
 - [Architecture](architecture.md) — components, request routing, and storage boundaries.
-- [GitHub skills](github-skills.md) — public skill format, review, publishing, and refresh.
+- [GitHub skills and workflows](github-skills.md) — public formats, review, publishing, and refresh.
 - [Human acceptance tests](human-acceptance-use-cases.md) — end-to-end test scenarios.
 - [Development](development.md) — local setup, checks, Android build, and live-device tests.
 - [Security and privacy](security.md) — execution policy, data boundaries, and trust model.

@@ -36,7 +36,7 @@ class PrivacyActivity : Activity() {
         listOf(
             "1" to ("Local first" to "Native actions and verified patterns run without an LLM call."),
             "2" to ("No raw-value memory" to "Learned mappings store an intent skeleton and typed placeholders—not your message, contact, destination, or original prompt."),
-            "3" to ("Cloud only when needed" to "The configured planner receives a redacted semantic screen. Screenshots are not sent by this app. Android's speech service handles voice recognition; offline recognition is requested when available."),
+            "3" to ("Cloud only when needed" to "Planning runs on this phone. Only when local routes miss, the selected provider receives the goal, a bounded redacted semantic screen, a compact verified path, and a few relevant skill descriptions. Screenshots and complete skill trees are not sent. Provider keys are encrypted with Android Keystore."),
             "4" to ("Verified before reuse" to "A model result is saved only after Android reports a successful semantic transition. Failures lower confidence and disable stale patterns."),
             "5" to ("GitHub skills are public" to "Alfred downloads reviewed, generalized skills from a public GitHub repository. Your personal learned skills remain only on this phone unless you explicitly export a proposal and create a pull request."),
             "6" to ("You stay in control" to "Message actions can prepare a draft but never press Send. Sensitive and destructive controls remain blocked."),

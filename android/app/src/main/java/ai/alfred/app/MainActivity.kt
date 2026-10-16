@@ -13,7 +13,9 @@ import android.provider.Settings
 import android.speech.SpeechRecognizer
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -42,11 +44,14 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
     private lateinit var confirmChoice: Button
     private lateinit var cancelChoice: Button
     private lateinit var mic: Button
+    private lateinit var typedGoal: EditText
     private lateinit var accessCard: LinearLayout
+    private lateinit var page: ScrollView
     private lateinit var voice: VoiceController
     private lateinit var agent: AgentCoordinator
     private var listening = false
     private var pendingConfirmation: String? = null
+    private var pendingSkillIds = longArrayOf()
     private val ui = Handler(Looper.getMainLooper())
     private var typewriter: Runnable? = null
     private var pendingDialogueText: String? = null
@@ -200,6 +205,44 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
             LinearLayout.LayoutParams.WRAP_CONTENT,
         )
 
+        val typedRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        typedGoal = EditText(this).apply {
+            hint = "Or type a request…"
+            contentDescription = "Type a request for Alfred"
+            setTextColor(Palette.Ink)
+            setHintTextColor(Palette.Muted)
+            textSize = 15f
+            isSingleLine = true
+            background = rounded(Palette.Surface, 18, this@MainActivity, Palette.SurfaceBright)
+            setPadding(dp(16), 0, dp(16), 0)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
+                    submitTypedGoal()
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+        typedRow.addView(typedGoal, LinearLayout.LayoutParams(0, dp(52), 1f))
+        typedRow.addView(Button(this).apply {
+            text = "Send"
+            isAllCaps = false
+            contentDescription = "Send typed request"
+            setTextColor(Palette.Night)
+            background = rounded(Palette.Violet, 18, this@MainActivity)
+            setOnClickListener { submitTypedGoal() }
+        }, LinearLayout.LayoutParams(dp(88), dp(52)).apply { marginStart = dp(9) })
+        root.addView(
+            typedRow,
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+
         mic = Button(this).apply {
             text = "●  Talk to Alfred"
             textSize = 17f
@@ -268,10 +311,11 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
         }
         root.addView(privacy)
 
-        return ScrollView(this).apply {
+        page = ScrollView(this).apply {
             isFillViewport = true
             addView(root)
         }
+        return page
     }
 
     private fun quickButton(title: String, goal: String): Button = Button(this).apply {
@@ -298,14 +342,39 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
         }
 
     private fun submitNewGoal(goal: String) {
+        updateSetupState()
         pendingConfirmation = null
+        pendingSkillIds = longArrayOf()
+        resetChoiceLabels()
         choiceRow.visibility = View.GONE
         mic.text = "●  Talk to Alfred"
         showDialogue("PLAYER REQUEST", "“$goal”", Palette.Violet)
         agent.submit(goal)
     }
 
+    private fun submitTypedGoal() {
+        val goal = typedGoal.text.toString().trim()
+        if (goal.isEmpty()) return
+        typedGoal.text.clear()
+        typedGoal.clearFocus()
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(typedGoal.windowToken, 0)
+        page.scrollTo(0, 0)
+        ui.postDelayed({ submitNewGoal(goal) }, 120L)
+    }
+
     private fun confirmPendingAction() {
+        if (pendingSkillIds.isNotEmpty()) {
+            val ids = pendingSkillIds
+            pendingSkillIds = longArrayOf()
+            choiceRow.visibility = View.GONE
+            resetChoiceLabels()
+            startActivity(
+                Intent(this, SkillsActivity::class.java)
+                    .putExtra(SkillsActivity.EXTRA_REVIEW_SKILL_IDS, ids)
+            )
+            return
+        }
         val goal = pendingConfirmation ?: return
         pendingConfirmation = null
         choiceRow.visibility = View.GONE
@@ -315,11 +384,24 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
     }
 
     private fun cancelPendingAction() {
+        val keepingSkillPrivate = pendingSkillIds.isNotEmpty()
+        agent.cancelPendingConfirmation()
         pendingConfirmation = null
+        pendingSkillIds = longArrayOf()
+        resetChoiceLabels()
         choiceRow.visibility = View.GONE
         pet.mood = PetMood.IDLE
         setStatus("QUEST PAUSED • YOUR CHOICE", Palette.Coral)
-        showDialogue("CHOICE SAVED", "No problem. I won’t perform that action.", Palette.Coral, true)
+        showDialogue(
+            "CHOICE SAVED",
+            if (keepingSkillPrivate) {
+                "The new skill stays private on this phone. You can publish it later from the Skill Library."
+            } else {
+                "No problem. I won’t perform that action."
+            },
+            Palette.Coral,
+            true,
+        )
         mic.text = "●  Ask another"
     }
 
@@ -382,6 +464,8 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
         mic.text = "●  Try again"
     }
 
+    override fun assistantIsForeground(): Boolean = hasWindowFocus()
+
     override fun onThinking(message: String) {
         pet.mood = PetMood.THINKING
         setStatus("THINKING • SEARCHING MEMORY", Palette.Violet)
@@ -396,6 +480,9 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
 
     override fun onConfirmation(goal: String, message: String) {
         pendingConfirmation = goal
+        pendingSkillIds = longArrayOf()
+        confirmChoice.text = "✓  Confirm"
+        cancelChoice.text = "Not now"
         pet.mood = PetMood.ASKING
         setStatus("ALFRED ASKS • YOUR CHOICE", Palette.Coral)
         showDialogue("DECISION POINT", message, Palette.Coral, true)
@@ -411,6 +498,26 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
         )
         showDialogue("QUEST COMPLETE", message, Palette.Mint, true)
         mic.text = "●  Ask another"
+    }
+
+    override fun onSkillLearned(skillIds: LongArray, names: List<String>) {
+        pendingConfirmation = null
+        pendingSkillIds = skillIds
+        confirmChoice.text = "Review & create PR"
+        cancelChoice.text = "Keep private"
+        pet.mood = PetMood.ASKING
+        setStatus("NEW SKILL • PUBLICATION CHOICE", Palette.Violet)
+        val label = names.joinToString().ifBlank { "the verified workflow" }
+        showDialogue(
+            "PUBLISH NEW SKILL?",
+            "I learned $label from verified actions. It is private on this phone. " +
+                "Would you like to review the generalized JSON and prepare a GitHub pull request? " +
+                "Nothing is uploaded without your approval.",
+            Palette.Violet,
+            true,
+        )
+        choiceRow.visibility = View.VISIBLE
+        mic.text = "Review learned skill"
     }
 
     override fun onResult(title: String, message: String) {
@@ -493,6 +600,11 @@ class MainActivity : Activity(), VoiceController.Listener, AgentCoordinator.Even
         val enabled = SemanticAccessibilityService.isEnabled(this)
         accessCard.visibility = if (enabled) View.GONE else View.VISIBLE
         if (enabled && pet.mood == PetMood.IDLE) status.text = "READY • LOCAL FIRST"
+    }
+
+    private fun resetChoiceLabels() {
+        confirmChoice.text = "✓  Confirm"
+        cancelChoice.text = "Not now"
     }
 
     companion object {

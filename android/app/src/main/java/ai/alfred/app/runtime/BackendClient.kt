@@ -19,7 +19,24 @@ data class RemotePlan(
     val terminal: Boolean,
 )
 
-class BackendClient(private val baseUrl: String) {
+interface PlanningClient {
+    fun plan(
+        goal: String,
+        snapshot: SemanticSnapshot,
+        confirmed: Boolean,
+        profileId: String,
+        callback: (Result<RemotePlan>) -> Unit,
+    )
+
+    fun report(
+        attemptId: String,
+        outcome: ActionOutcome,
+        screenId: String?,
+        callback: (Result<LocalCacheArtifact?>) -> Unit = {},
+    )
+}
+
+class BackendClient(private val baseUrl: String) : PlanningClient {
     private val executor = Executors.newSingleThreadExecutor()
 
     init {
@@ -30,7 +47,7 @@ class BackendClient(private val baseUrl: String) {
         ) { "Plain HTTP is allowed only for a local USB/emulator endpoint" }
     }
 
-    fun plan(
+    override fun plan(
         goal: String,
         snapshot: SemanticSnapshot,
         confirmed: Boolean,
@@ -70,11 +87,11 @@ class BackendClient(private val baseUrl: String) {
         }
     }
 
-    fun report(
+    override fun report(
         attemptId: String,
         outcome: ActionOutcome,
         screenId: String?,
-        callback: (Result<LocalCacheArtifact?>) -> Unit = {},
+        callback: (Result<LocalCacheArtifact?>) -> Unit,
     ) {
         executor.execute {
             callback(runCatching {

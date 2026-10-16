@@ -10,10 +10,11 @@ Human goal
    |
    v
 Android AgentCoordinator
-   |-- 1. specialized/built-in route
-   |-- 2. private learned pattern (phone SQLite)
-   |-- 3. reviewed public skill (downloaded GitHub catalog)
-   `-- 4. optional planner on a cache miss
+   |-- 1. matching workflow edge (phone task graph)
+   |-- 2. specialized/built-in route
+   |-- 3. private learned sub-skill (phone SQLite)
+   |-- 4. reviewed public workflow or skill (downloaded GitHub catalog)
+   `-- 5. Android client planner for the unknown edge only
              |-- Gemini
              |-- OpenRouter
              `-- custom/local compatible model
@@ -22,7 +23,7 @@ Android AgentCoordinator
 Safety gate -> semantic action -> live-node reacquisition -> verification -> avatar/result UI
 ```
 
-The first unambiguous match wins. `LOCAL_ONLY` stops after step 3. `CLOUD_FIRST` exists for planner
+The first unambiguous match wins. `LOCAL_ONLY` stops after step 4. `CLOUD_FIRST` exists for planner
 testing. A task is bounded to twelve coordinator steps and a downloaded skill to eight actions.
 
 ## Android application
@@ -31,10 +32,19 @@ The application owns the user experience and the final execution decision:
 
 - `MainActivity` and `PetView` handle voice/text input, listening/thinking/acting/success/error
   animation states, confirmation, and result cards.
+- `ConfirmationActivity` is a translucent approval panel for actions proposed while another screen
+  is active. It preserves that exact activity and viewport underneath; after terminal success the
+  existing `MainActivity` is brought forward for the animated result or publication choice.
 - `NativeIntentRouter` handles deterministic common intents without network access.
 - `LocalSemanticCache` stores generalized personal templates, confidence, and outcomes in private
   app storage. Failures reduce confidence; two consecutive failures disable a pattern.
-- `GitHubSkillStore` stores only the currently validated public catalog and per-device enable flags.
+- `WorkflowStore` compiles a successful multi-step task into a branching DAG-like recipe. Recipe
+  nodes reference reusable phone, GitHub, or native sub-skills; they do not copy concrete user slot
+  values. A known phone edge is executed directly. A missing or changed edge falls through to the
+  normal router and only that edge may require the planner.
+- `GitHubSkillStore` stores only the currently validated public skill/workflow catalog and
+  per-device enable flags. Public workflow cursors select exactly one child by semantic screen;
+  zero or multiple matches abandon that public graph and fall through to normal planning.
 - `SemanticAccessibilityService` exposes a reduced semantic screen, reacquires live nodes before an
   action, rejects ambiguous/destructive targets, and verifies the result.
 
@@ -53,24 +63,51 @@ pull request -> schema/safety validation -> review -> merge
      -> Android digest/schema/policy verification -> atomic local replacement
 ```
 
-Each index entry contains an ID, version, path, and SHA-256 digest. The client rejects malformed
-paths, duplicate IDs, oversized catalogs/files, unsupported actions, unsafe URIs, destructive
-targets, revision rollback, and same-revision content changes. A failed refresh leaves the previous
-working catalog intact.
+Each skill or workflow index entry contains an ID, version, path, and SHA-256 digest. Workflow
+documents add an entry node, screen-matched child nodes, and device-verification evidence. The
+builder and client reject malformed paths, duplicate IDs, cycles, unreachable nodes, missing
+children, oversized catalogs/files, unsupported actions, unsafe URIs, destructive targets,
+revision rollback, and same-revision content changes. A failed refresh leaves the previous working
+catalog intact.
 
 GitHub is a distribution and review mechanism, not personal synchronization. Users can export a
-generalized proposal to the clipboard and explicitly open the contribution guide. No background
-upload exists.
+generalized skill or workflow proposal to the clipboard and explicitly open GitHub's new-file / PR
+flow. Every new shared artifact is reviewed as a pull request. No background upload exists.
 
-## Optional planner
+## Android client planner
 
-The Python FastAPI component exposes planning endpoints for novel requests. It receives the goal
-and a reduced semantic state, validates structured model output, and returns one bounded action at
-a time. Provider credentials stay in the planner environment.
+Planning and orchestration remain inside the Android process. After every deterministic source
+misses, the client sends the configured model provider only the goal, a bounded redacted semantic
+state, a compact verified-path summary, and at most five locally selected skill hints. It never
+sends the complete personal cache or workflow graph. Gemini is attempted first and OpenRouter is
+the fallback.
 
-After Android reports a verified successful action, the planner may produce a generalized artifact
-for the phone cache. Its local SQLite result cache is an optimization for a development planner,
-not the public skill registry and not a cross-device personal-skill service.
+The provider returns one schema-constrained proposed edge. Android independently resolves its
+semantic target, applies action policy, requests confirmation, executes it, verifies the resulting
+screen, and only then saves a generalized artifact. Provider keys are BYOK secrets encrypted by
+Android Keystore. The Python FastAPI planner remains only as a development reference and protocol
+test harness; the application does not depend on it.
+
+## Incremental task generation
+
+Alfred does not ask a model to invent a long script and then execute it blindly. It builds a task
+graph online:
+
+1. Match the root goal to a previously verified workflow recipe when possible.
+2. At the current semantic screen, follow one unambiguous verified child edge.
+3. Otherwise try a built-in action, a generalized phone sub-skill, and a reviewed GitHub skill.
+4. If all local sources miss, ask the planner for one bounded next action.
+5. Execute, verify the resulting screen, and retain the edge only after success.
+6. Repeat until the goal is satisfied, then compile the verified trace into the workflow graph.
+
+The stored shape is technically a directed graph represented as recipe trees plus shared sub-skill
+references. Branches cover different screens or app versions, while a sub-skill such as “open
+Settings” can be referenced by several main workflows. When an equivalent canonical sub-skill and
+parameterized action already exist, the cache reuses its ID instead of creating a duplicate.
+
+Workflow storage contains goal fingerprints, generalized templates, semantic screen IDs, action
+kinds, and skill references. Concrete parameter values (a message, destination, search term, and so
+on) are deliberately excluded from workflow traces.
 
 The planner can be omitted entirely when only built-in, learned, and downloaded skills are needed.
 
@@ -80,9 +117,10 @@ The planner can be omitted entirely when only built-in, learned, and downloaded 
 |---|---|---|
 | Raw voice/text request | Active Android request memory | No |
 | Personal generalized skills and outcomes | Private Android SQLite | No |
-| Public reviewed skills | GitHub repository; validated Android copy | Public by design |
-| Model keys | Optional planner environment | No |
-| Reduced semantic state sent on a miss | Optional configured model provider | Yes, only for that call |
+| Workflow recipes and skill-reference graph | Private Android SQLite | No |
+| Public reviewed skills and workflows | GitHub repository; validated Android copy | Public by design |
+| Model keys | Keystore-encrypted Android app storage | No |
+| Reduced semantic state sent on a miss | Configured Gemini/OpenRouter provider | Yes, only for that call |
 | Gmail row/body text | Android working memory for the briefing | No |
 
 ## Removed infrastructure
