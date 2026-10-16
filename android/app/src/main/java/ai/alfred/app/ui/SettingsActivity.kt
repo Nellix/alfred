@@ -17,6 +17,7 @@ import ai.alfred.app.runtime.InferenceMode
 import ai.alfred.app.runtime.LocalSemanticCache
 import ai.alfred.app.runtime.SemanticAccessibilityService
 import ai.alfred.app.runtime.SkillsClient
+import ai.alfred.app.runtime.WorkflowStore
 
 class SettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -158,10 +159,12 @@ class SettingsActivity : Activity() {
                 startActivity(Intent(this@SettingsActivity, PrivacyActivity::class.java))
             }.apply { setPadding(0, dp(10), 0, 0) })
             addView(actionButton("Forget my learned skills") {
-                val count = LocalSemanticCache(this@SettingsActivity).clearAll()
+                val skillCount = LocalSemanticCache(this@SettingsActivity).clearAll()
+                val workflowCount = WorkflowStore(this@SettingsActivity).clearAll()
                 Toast.makeText(
                     this@SettingsActivity,
-                    "$count phone skill${if (count == 1) "" else "s"} removed",
+                    "$skillCount phone skill${if (skillCount == 1) "" else "s"} and " +
+                        "$workflowCount workflow${if (workflowCount == 1) "" else "s"} removed",
                     Toast.LENGTH_LONG,
                 ).show()
             }.apply {

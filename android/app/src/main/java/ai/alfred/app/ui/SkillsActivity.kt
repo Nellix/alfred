@@ -22,6 +22,9 @@ import ai.alfred.app.runtime.GitHubSkillSummary
 import ai.alfred.app.runtime.LocalSemanticCache
 import ai.alfred.app.runtime.PhoneSkillSummary
 import ai.alfred.app.runtime.SkillsClient
+import ai.alfred.app.runtime.WorkflowRecipeSummary
+import ai.alfred.app.runtime.WorkflowStore
+import org.json.JSONObject
 import java.util.Date
 
 class SkillsActivity : Activity() {
@@ -29,7 +32,9 @@ class SkillsActivity : Activity() {
     private lateinit var refreshButton: Button
     private lateinit var downloadedSkills: LinearLayout
     private lateinit var phoneSkills: LinearLayout
+    private lateinit var learnedWorkflows: LinearLayout
     private var automaticRefreshStarted = false
+    private var reviewOfferShown = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,6 +46,11 @@ class SkillsActivity : Activity() {
     override fun onResume() {
         super.onResume()
         reload()
+        if (!reviewOfferShown) {
+            reviewOfferShown = true
+            val ids = intent.getLongArrayExtra(EXTRA_REVIEW_SKILL_IDS) ?: longArrayOf()
+            if (ids.isNotEmpty()) showLearnedSkillReview(ids)
+        }
     }
 
     private fun buildContent(): ScrollView {
@@ -107,6 +117,15 @@ class SkillsActivity : Activity() {
         phoneSkills = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(phoneSkills)
 
+        content.addView(sectionTitle("LEARNED WORKFLOWS"))
+        content.addView(label(
+            "Workflows are branching recipes. Every node references a reusable sub-skill; concrete search terms, destinations, and message text are not stored here.",
+            13f,
+            Palette.Muted,
+        ).apply { setPadding(0, 0, 0, dp(9)) })
+        learnedWorkflows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(learnedWorkflows)
+
         return ScrollView(this).apply {
             isFillViewport = true
             addView(content)
@@ -115,6 +134,7 @@ class SkillsActivity : Activity() {
 
     private fun reload() {
         renderPhoneSkills()
+        renderWorkflows()
         val client = client()
         if (client == null) {
             registryStatus.text = "GitHub registry is not configured. Add its raw URL in Settings."
@@ -272,20 +292,7 @@ class SkillsActivity : Activity() {
         })
         if (skill.goalTemplate != null) {
             addView(actionButton("Prepare GitHub pull request") {
-                val proposal = cache.contributionProposal(skill.id)
-                if (proposal == null) {
-                    Toast.makeText(this@SkillsActivity, "This skill cannot be exported", Toast.LENGTH_LONG)
-                        .show()
-                } else {
-                    val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("Alfred skill proposal", proposal))
-                    Toast.makeText(
-                        this@SkillsActivity,
-                        "Generalized skill JSON copied; opening the pull-request guide",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                    openUrl("${SettingsActivity.GITHUB_SKILLS_REPOSITORY}/blob/main/CONTRIBUTING.md")
-                }
+                preparePullRequest(cache, skill.id)
             }.apply { setPadding(0, dp(8), 0, 0) })
         }
         addView(actionButton("Delete from phone") {
@@ -302,6 +309,107 @@ class SkillsActivity : Activity() {
             setTextColor(Palette.Coral)
             setPadding(0, dp(8), 0, 0)
         })
+    }
+
+    private fun renderWorkflows() {
+        learnedWorkflows.removeAllViews()
+        val store = WorkflowStore(this)
+        val recipes = store.listRecipes()
+        if (recipes.isEmpty()) {
+            learnedWorkflows.addView(
+                emptyCard("No completed multi-step workflow has been learned yet.")
+            )
+            return
+        }
+        recipes.forEach { recipe ->
+            learnedWorkflows.addView(workflowCard(store, recipe), spaced())
+        }
+    }
+
+    private fun workflowCard(
+        store: WorkflowStore,
+        recipe: WorkflowRecipeSummary,
+    ): LinearLayout = card().apply {
+        addView(label(recipe.goalTemplate ?: "Private exact-match workflow", 16f, Palette.Ink, true))
+        addView(label(
+            "${recipe.nodes} reusable nodes · ${recipe.branchPoints} branch points · " +
+                "${recipe.successes} completed · ${recipe.failures} failed",
+            12f,
+            Palette.Muted,
+        ).apply { setPadding(0, dp(6), 0, dp(8)) })
+        addView(Switch(this@SkillsActivity).apply {
+            text = if (recipe.active) "Workflow enabled" else "Workflow disabled"
+            setTextColor(Palette.Ink)
+            isChecked = recipe.active
+            thumbTintList = android.content.res.ColorStateList.valueOf(Palette.Mint)
+            setOnCheckedChangeListener { _, enabled ->
+                store.setActive(recipe.id, enabled)
+                text = if (enabled) "Workflow enabled" else "Workflow disabled"
+            }
+        })
+        addView(actionButton("Delete workflow recipe") {
+            AlertDialog.Builder(this@SkillsActivity)
+                .setTitle("Delete learned workflow?")
+                .setMessage(
+                    "This removes the task graph from this phone. Its reusable sub-skills remain available."
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete") { _, _ ->
+                    store.delete(recipe.id)
+                    renderWorkflows()
+                }
+                .show()
+        }.apply {
+            setTextColor(Palette.Coral)
+            setPadding(0, dp(8), 0, 0)
+        })
+    }
+
+    private fun showLearnedSkillReview(ids: LongArray) {
+        val cache = LocalSemanticCache(this)
+        val publishable = ids.filter { cache.contributionProposal(it) != null }
+        if (publishable.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("New skill learned")
+            .setMessage(
+                "Alfred saved ${publishable.size} generalized, verified pattern" +
+                    if (publishable.size == 1) {
+                        ". Review its JSON before GitHub creates a branch and pull request."
+                    } else {
+                        "s. Start with the first proposal; the others remain available below."
+                    }
+            )
+            .setNegativeButton("Keep private", null)
+            .setPositiveButton("Prepare PR") { _, _ ->
+                preparePullRequest(cache, publishable.first())
+            }
+            .show()
+    }
+
+    private fun preparePullRequest(cache: LocalSemanticCache, skillId: Long) {
+        val proposal = cache.contributionProposal(skillId)
+        if (proposal == null) {
+            Toast.makeText(this, "This skill cannot be exported", Toast.LENGTH_LONG).show()
+            return
+        }
+        val proposalId = runCatching { JSONObject(proposal).getString("id") }
+            .getOrDefault("learned-skill-$skillId")
+        val filename = proposalId.replace(Regex("[^a-zA-Z0-9._-]"), "-") + ".json"
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Alfred skill proposal", proposal))
+        Toast.makeText(
+            this,
+            "Generalized JSON copied. Review it on GitHub, commit to a branch, then open the PR.",
+            Toast.LENGTH_LONG,
+        ).show()
+        openUrl(
+            Uri.parse("${SettingsActivity.GITHUB_SKILLS_REPOSITORY}/new/main")
+                .buildUpon()
+                .appendQueryParameter("filename", "skills/community/alfred/$filename")
+                .appendQueryParameter("value", proposal)
+                .build()
+                .toString()
+        )
     }
 
     private fun builtInSkillCard(number: Int, skill: BuiltInSkillDefinition): LinearLayout =
@@ -361,5 +469,6 @@ class SkillsActivity : Activity() {
 
     companion object {
         private const val AUTO_REFRESH_MS = 6 * 60 * 60 * 1000L
+        const val EXTRA_REVIEW_SKILL_IDS = "ai.alfred.app.extra.REVIEW_SKILL_IDS"
     }
 }

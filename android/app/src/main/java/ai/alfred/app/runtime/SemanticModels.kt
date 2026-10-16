@@ -34,7 +34,7 @@ data class SemanticNode(
     val semanticSignature: String,
     val sensitivity: String,
 ) {
-    val label: String get() = text ?: contentDescription ?: resourceId ?: role
+    val label: String get() = contentDescription ?: text ?: resourceId ?: role
 
     fun toJson(): JSONObject = JSONObject()
         .put("handle", handle)
@@ -71,6 +71,9 @@ data class SemanticSnapshot(
     val capturedAtSeconds: Double,
 ) {
     val digest: String = nodes.joinToString("|") { it.semanticSignature }.hashCode().toString()
+    val viewportDigest: String = nodes.joinToString("|") {
+        "${it.handle}:${it.visible}:${it.bounds}"
+    }.hashCode().toString()
 
     fun toJson(): JSONObject = JSONObject()
         .put("package", packageName)

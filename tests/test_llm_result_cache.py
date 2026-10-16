@@ -6,7 +6,7 @@ from sma.device.replay_adapter import ReplayDeviceAdapter
 from sma.execution.action_executor import SemanticExecutor
 from sma.intelligence.intent_runtime import CachedIntentExecutor, CachedIntentStatus
 from sma.memory.database import MIGRATIONS, Database
-from sma.memory.intent_cache import IntentCache
+from sma.memory.intent_cache import IntentCache, IntentSafety
 from sma.memory.llm_result_cache import (
     GeneralizedIntentParser,
     GeneralizedLLMResultCache,
@@ -83,7 +83,7 @@ async def test_verified_llm_result_is_generalized_and_reused_without_model(
             IntentCache(database.connection),
             SkillEngine(second_executor, database.connection),
             parser,
-        ).execute("Look for Bluetooth inside Settings")
+        ).execute("Look for Bluetooth inside Settings", confirmed=True)
 
     assert result.status is CachedIntentStatus.SUCCESS
     assert result.model_calls == 0
@@ -123,6 +123,30 @@ def test_unverified_or_blocked_model_result_is_never_cached(settings_data, tmp_p
             database.connection.execute("SELECT COUNT(*) FROM llm_result_templates").fetchone()[0]
             == 0
         )
+
+
+def test_verified_novel_low_risk_intent_can_be_learned(settings_data, tmp_path) -> None:
+    from sma.perception.canonicalizer import canonicalize
+
+    state = canonicalize(settings_data["states"]["settings_home"])
+    plan = PlannedSemanticAction(
+        canonical_intent="productivity.settings.lookup",
+        parameters={"query": "Battery optimization"},
+        action=SemanticAction(action="back"),
+    )
+    success = ActionResult(status=ActionStatus.SUCCESS, action="back", verified=True)
+
+    with Database(tmp_path / "novel.db") as database:
+        learned = GeneralizedLLMResultCache(database.connection).learn_verified(
+            "Find Battery optimization quickly",
+            plan,
+            success,
+            state,
+            provenance=LLMCacheProvenance(model_id="test-model"),
+        )
+
+    assert learned.safety is IntentSafety.LOW
+    assert learned.generalized_template == "find ${query} quickly"
 
 
 def test_llm_result_cache_migration_is_present(tmp_path) -> None:

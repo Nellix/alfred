@@ -65,7 +65,7 @@ class CanonicalNode(BaseModel):
 
     @property
     def label(self) -> str:
-        return (self.text or self.content_description or self.resource_id or self.role).strip()
+        return (self.content_description or self.text or self.resource_id or self.role).strip()
 
     @property
     def actionable(self) -> bool:

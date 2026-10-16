@@ -43,7 +43,14 @@ class SemanticAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event?.className?.toString()?.let { lastWindowClass = it }
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val packageName = event.packageName?.toString().orEmpty()
+            event.className?.toString()
+                ?.takeIf { it == packageName || it.startsWith("$packageName.") }
+                ?.let {
+                    lastWindowClass = it
+                }
+        }
         revision.incrementAndGet()
     }
 
@@ -55,9 +62,22 @@ class SemanticAccessibilityService : AccessibilityService() {
         val windowId = root.windowId.toString()
         val nodes = mutableListOf<SemanticNode>()
         walk(root, null, "0", packageName, windowId, nodes)
+        val visibleStructure = hash(
+            nodes.asSequence()
+                .filter { it.visible }
+                .map { it.structuralSignature }
+                .sorted()
+                .joinToString("|")
+        ).take(12)
+        val windowClass = resolvedWindowClass(packageName, nodes)
+        val screenVariant = if (windowClass == "ai.alfred.app.MainActivity") {
+            "home"
+        } else {
+            visibleStructure
+        }
         return SemanticSnapshot(
             packageName = packageName,
-            screenId = "$packageName:$lastWindowClass",
+            screenId = "$packageName:$windowClass:$screenVariant",
             windowId = windowId,
             revision = revision.get(),
             nodes = nodes,
@@ -65,7 +85,105 @@ class SemanticAccessibilityService : AccessibilityService() {
         )
     }
 
+    private fun resolvedWindowClass(
+        packageName: String,
+        nodes: List<SemanticNode>,
+    ): String {
+        if (packageName != this.packageName) return lastWindowClass
+        val labels = nodes.asSequence().filter { it.visible }.mapNotNull { it.text }.toSet()
+        return when {
+            "ALFRED • APPROVAL NEEDED" in labels -> "ai.alfred.app.ui.ConfirmationActivity"
+            "What shall we do?" in labels -> "ai.alfred.app.MainActivity"
+            "DEVICE CONTROL" in labels -> "ai.alfred.app.ui.SettingsActivity"
+            "Private by design" in labels -> "ai.alfred.app.ui.PrivacyActivity"
+            else -> lastWindowClass
+        }
+    }
+
     fun execute(action: DeviceAction, callback: (ActionOutcome) -> Unit) {
+        execute(action, callback, revealAttempts = 0, revealScrollAction = null)
+    }
+
+    private fun execute(
+        action: DeviceAction,
+        callback: (ActionOutcome) -> Unit,
+        revealAttempts: Int,
+        revealScrollAction: Int?,
+    ) {
+        if (action.action in setOf("click", "set_text")) {
+            val node = action.target?.let { findNode(it, action.action) }
+            if (node == null && revealAttempts > 0) {
+                if (revealAttempts >= MAX_REVEAL_CONTROL_ATTEMPTS) {
+                    callback(
+                        ActionOutcome(
+                            false,
+                            false,
+                            "TARGET_NOT_FOUND",
+                            "The current screen could not reveal that semantic control.",
+                        )
+                    )
+                    return
+                }
+                val accepted = findScrollableNode()?.performAction(
+                    revealScrollAction ?: AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                ) == true
+                if (!accepted) {
+                    callback(
+                        ActionOutcome(
+                            false,
+                            false,
+                            "TARGET_NOT_FOUND",
+                            "The current screen could not reveal that semantic control.",
+                        )
+                    )
+                    return
+                }
+                Handler(Looper.getMainLooper()).postDelayed(
+                    {
+                        execute(
+                            action,
+                            callback,
+                            revealAttempts + 1,
+                            revealScrollAction,
+                        )
+                    },
+                    REVEAL_CONTROL_DELAY_MS,
+                )
+                return
+            }
+            if (node != null && !node.isVisibleToUser) {
+                if (revealAttempts >= MAX_REVEAL_CONTROL_ATTEMPTS) {
+                    callback(
+                        ActionOutcome(
+                            false,
+                            false,
+                            "TARGET_NOT_FOUND",
+                            "The current screen could not reveal that semantic control.",
+                        )
+                    )
+                    return
+                }
+                val scrollAction = revealScrollAction ?: scrollDirectionFor(node)
+                val scrollable = findScrollableAncestor(node) ?: findScrollableNode()
+                val accepted = scrollable?.performAction(scrollAction) == true
+                if (!accepted) {
+                    callback(
+                        ActionOutcome(
+                            false,
+                            false,
+                            "TARGET_NOT_FOUND",
+                            "The current screen could not reveal that semantic control.",
+                        )
+                    )
+                    return
+                }
+                Handler(Looper.getMainLooper()).postDelayed(
+                    { execute(action, callback, revealAttempts + 1, scrollAction) },
+                    REVEAL_CONTROL_DELAY_MS,
+                )
+                return
+            }
+        }
         val before = snapshot()
         val accepted = try {
             perform(action)
@@ -88,7 +206,12 @@ class SemanticAccessibilityService : AccessibilityService() {
             val after = snapshot()
             val changed = action.action in setOf("wait", "stop") || (
                 before != null && after != null &&
-                    (before.packageName != after.packageName || before.screenId != after.screenId || before.digest != after.digest)
+                    (
+                        before.packageName != after.packageName ||
+                            before.screenId != after.screenId ||
+                            before.digest != after.digest ||
+                            (action.action == "scroll" && before.viewportDigest != after.viewportDigest)
+                    )
                 )
             callback(
                 ActionOutcome(
@@ -359,6 +482,12 @@ class SemanticAccessibilityService : AccessibilityService() {
             val packageName = requireNotNull(action.packageName) { "Missing package" }
             val launch = packageManager.getLaunchIntentForPackage(packageName) ?: return false
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (packageName == this.packageName) {
+                // Bring Alfred's existing assistant screen forward without creating a second
+                // MainActivity. A subsequent Back then restores the exact screen awaiting an
+                // approved action.
+                launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
             startActivity(launch)
             true
         }
@@ -378,7 +507,7 @@ class SemanticAccessibilityService : AccessibilityService() {
         "stop" -> true
         "click", "set_text", "scroll" -> {
             val target = requireNotNull(action.target) { "Missing semantic target" }
-            val node = findNode(target) ?: return false
+            val node = findNode(target, action.action) ?: return false
             when (action.action) {
                 "click" -> node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 "set_text" -> node.performAction(
@@ -396,26 +525,80 @@ class SemanticAccessibilityService : AccessibilityService() {
         else -> false
     }
 
-    private fun findNode(target: String): AccessibilityNodeInfo? {
+    private fun findScrollableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var current = node.parent
+        while (current != null) {
+            if (current.isScrollable) return current
+            current = current.parent
+        }
+        return null
+    }
+
+    private fun findScrollableNode(): AccessibilityNodeInfo? {
+        val root = rootInActiveWindow ?: return null
+        fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            if (node.isScrollable && node.isVisibleToUser) return node
+            for (index in 0 until node.childCount) {
+                node.getChild(index)?.let { visit(it)?.let { found -> return found } }
+            }
+            return null
+        }
+        return visit(root)
+    }
+
+    private fun scrollDirectionFor(node: AccessibilityNodeInfo): Int {
+        val nodeBounds = Rect()
+        val rootBounds = Rect()
+        node.getBoundsInScreen(nodeBounds)
+        rootInActiveWindow?.getBoundsInScreen(rootBounds)
+        return if (!rootBounds.isEmpty && nodeBounds.bottom <= rootBounds.top) {
+            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        } else {
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        }
+    }
+
+    private fun findNode(target: String, action: String): AccessibilityNodeInfo? {
         val root = rootInActiveWindow ?: return null
         val found = mutableListOf<AccessibilityNodeInfo>()
+        val exactLabelMatches = mutableListOf<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo, path: String) {
-            val label = node.text?.toString()?.trim().takeUnless { it.isNullOrEmpty() }
-                ?: node.contentDescription?.toString()?.trim().takeUnless { it.isNullOrEmpty() }
-                ?: node.viewIdResourceName?.substringAfterLast('/')
+            val labels = sequenceOf(
+                node.text?.toString()?.trim(),
+                node.contentDescription?.toString()?.trim(),
+                node.viewIdResourceName?.substringAfterLast('/'),
+                nodeRole(node),
+            ).filterNotNull().filter { it.isNotEmpty() }.toList()
             val handle = stableHandle(node, path)
-            val matches = if (target.startsWith("label:")) {
-                label?.equals(target.removePrefix("label:").trim(), ignoreCase = true) == true
+            val requestedLabel = target.removePrefix("label:").trim()
+            val labelTarget = target.startsWith("label:")
+            val matches = if (labelTarget) {
+                labels.any { it.equals(requestedLabel, ignoreCase = true) }
             } else {
                 handle == target
             }
-            if (matches) {
-                found += node
+            val supportsAction = when (action) {
+                "click" -> node.isClickable
+                "set_text" -> node.isEditable
+                "scroll" -> node.isScrollable
+                else -> false
+            }
+            val exactHandle = !labelTarget && handle == target
+            if (matches && node.isEnabled && supportsAction) {
+                if (labelTarget && labels.any { it == requestedLabel }) {
+                    exactLabelMatches += node
+                } else if (node.isVisibleToUser || exactHandle || labelTarget) {
+                    found += node
+                }
             }
             for (index in 0 until node.childCount) node.getChild(index)?.let { visit(it, "$path.$index") }
         }
         visit(root, "0")
-        return found.singleOrNull()
+        return if (exactLabelMatches.isNotEmpty()) {
+            exactLabelMatches.singleOrNull()
+        } else {
+            found.singleOrNull()
+        }
     }
 
     private fun findConversationList(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -580,7 +763,7 @@ class SemanticAccessibilityService : AccessibilityService() {
             if (node.isScrollable) add("scroll")
         }
         val className = node.className?.toString().orEmpty()
-        val role = className.substringAfterLast('.').ifBlank { "view" }.lowercase()
+        val role = nodeRole(node)
         val structural = hash("$packageName|${node.viewIdResourceName}|$className|$path")
         val semantic = hash("$structural|$text|$description|${node.isChecked}|${node.isSelected}")
         output += SemanticNode(
@@ -621,6 +804,13 @@ class SemanticAccessibilityService : AccessibilityService() {
         "${node.packageName}|${node.windowId}|${node.viewIdResourceName}|${node.className}|$path"
     ).take(10)
 
+    private fun nodeRole(node: AccessibilityNodeInfo): String = node.className
+        ?.toString()
+        .orEmpty()
+        .substringAfterLast('.')
+        .ifBlank { "view" }
+        .lowercase()
+
     private fun hash(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray())
         .joinToString("") { "%02x".format(it) }
@@ -639,6 +829,8 @@ class SemanticAccessibilityService : AccessibilityService() {
         private const val MAX_MAIL_BODY_CHARS = 1_200
         private const val MIN_MAIL_BODY_LABEL_CHARS = 2
         private const val MIN_VISUAL_BODY_HEIGHT_PX = 160
+        private const val MAX_REVEAL_CONTROL_ATTEMPTS = 6
+        private const val REVEAL_CONTROL_DELAY_MS = 300L
         private val GMAIL_NATIVE_BODY_IDS = setOf(
             "gmail_card_title",
             "gmail_card_subtitle",

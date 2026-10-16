@@ -30,6 +30,8 @@ a generalized skill is an explicit GitHub pull request.
 - Two distinct Gmail briefings: inbox rows only, or confirmed message-body summaries processed on
   the phone.
 - A private SQLite semantic cache for self-improving personal patterns.
+- An on-device task generator that learns verified workflow graphs and reuses their component
+  sub-skills; only an unknown graph edge falls through to the LLM.
 - A direct, digest-verified GitHub skill catalog with refresh, enable/disable, and contribution UI.
 - An optional Python planner for novel requests. Model credentials stay outside the APK.
 - Deterministic replay fixtures and tests for routing, safety, caching, and token reduction.
@@ -45,7 +47,7 @@ voice/text goal
       |
       v
 Android app
-  built-ins -> personal phone cache -> downloaded GitHub skills -> optional LLM planner
+  workflow edge -> built-ins -> personal phone cache -> GitHub skills -> optional LLM planner
       |                |                       |                         |
       |          private SQLite       static JSON + SHA-256       Gemini/OpenRouter/
       |                                   from GitHub               local endpoint

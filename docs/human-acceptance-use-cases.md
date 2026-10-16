@@ -147,3 +147,18 @@ then request an action that would submit or transfer.
 
 Expected: Alfred does not learn or auto-run a public destructive workflow. Treat any unintended
 interaction as a release-blocking security failure.
+
+## HU-19 — Learn and replay a workflow graph
+
+1. Start from the same screen and give Alfred a safe multi-step goal that is not yet a workflow.
+2. Confirm proposed interactive edges and let the task complete successfully. When approval is
+   needed away from Alfred's home, verify the translucent Alfred panel leaves the target activity
+   and its scroll position visible underneath.
+3. Open **Skill Library → Learned workflows** and inspect its node/branch counts.
+4. Return to the original screen and repeat the goal with a different value accepted by its
+   generalized template.
+
+Expected: the first run uses cached/built-in sub-skills where possible and calls the planner only
+for unknown edges. The completed trace appears as one workflow whose nodes reference reusable
+sub-skills. The second run says it is following learned workflow edges and makes zero LLM calls.
+Disabling the workflow forces normal routing; deleting it leaves the component phone skills intact.

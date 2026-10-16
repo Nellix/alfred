@@ -46,6 +46,20 @@ class FakeStopPlanner:
         )
 
 
+class FakeMispointedScrollPlanner:
+    async def plan_with_intent(self, goal, state):
+        title = next(node for node in state.nodes if node.label == "Settings")
+        return (
+            PlannedSemanticAction(
+                canonical_intent="android.settings.scroll",
+                parameters={},
+                intent_confidence=0.96,
+                action=SemanticAction(action="scroll", target=title.handle),
+            ),
+            ModelResponse(content="{}", usage=ModelUsage(), model="fake-cloud"),
+        )
+
+
 @pytest.mark.asyncio
 async def test_gateway_learns_verified_model_result_then_returns_zero_call_plan(
     settings_data, tmp_path
@@ -62,7 +76,10 @@ async def test_gateway_learns_verified_model_result_then_returns_zero_call_plan(
             )
         )
         assert first.source == "llm" and first.model_calls == 1
+        assert first.confirmation_required is True
         assert first.attempt_id is not None
+        assert "Search settings" in (first.message or "")
+        assert planner.calls == 1
         recorded = gateway.outcome(
             AgentOutcomeRequest(
                 attempt_id=first.attempt_id,
@@ -81,6 +98,7 @@ async def test_gateway_learns_verified_model_result_then_returns_zero_call_plan(
                 goal="Look for Bluetooth inside Settings",
                 state=state,
                 profile_id="account-a",
+                confirmed=True,
             )
         )
         other_account = await gateway.plan(
@@ -130,3 +148,48 @@ async def test_terminal_model_step_is_learned_as_screen_scoped_completion(
     assert outcome.local_artifact is not None and outcome.local_artifact.terminal is True
     assert outcome.local_artifact.actions[0].action == "stop"
     assert warm.source == "cache" and warm.terminal is True and warm.model_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_recovers_mispointed_scroll_when_screen_has_one_scroll_container(
+    settings_data, tmp_path
+) -> None:
+    state = canonicalize(settings_data["states"]["settings_home"])
+    with Database(tmp_path / "scroll-recovery.db") as database:
+        gateway = AgentPlanningGateway(
+            database,
+            FakeMispointedScrollPlanner(),  # type: ignore[arg-type]
+        )
+        response = await gateway.plan(
+            AgentPlanRequest(goal="Scroll down in Settings", state=state)
+        )
+
+    assert response.source == "llm"
+    assert response.actions[0].action == "scroll"
+    assert response.actions[0].target == "label:settings/list"
+
+
+@pytest.mark.asyncio
+async def test_gateway_replaces_stop_when_requested_control_is_offscreen(
+    settings_data, tmp_path
+) -> None:
+    state = canonicalize(settings_data["states"]["settings_home"])
+    state = state.model_copy(
+        update={
+            "nodes": [
+                node.model_copy(update={"visible": False})
+                if node.label == "Network & internet"
+                else node
+                for node in state.nodes
+            ]
+        }
+    )
+    with Database(tmp_path / "premature-stop.db") as database:
+        gateway = AgentPlanningGateway(database, FakeStopPlanner())  # type: ignore[arg-type]
+        response = await gateway.plan(
+            AgentPlanRequest(goal="Open Network and internet", state=state)
+        )
+
+    assert response.terminal is False
+    assert response.actions[0].action == "scroll"
+    assert response.actions[0].target == "label:settings/list"

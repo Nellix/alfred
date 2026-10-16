@@ -88,6 +88,11 @@ data class PhoneSkillSummary(
     val updatedAt: Long,
 )
 
+data class LocalCacheSaveResult(
+    val id: Long,
+    val created: Boolean,
+)
+
 class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic-intents.db", null, 3) {
     override fun onCreate(database: SQLiteDatabase) {
         createPatterns(database)
@@ -142,9 +147,17 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
         }
     }
 
-    fun save(artifact: LocalCacheArtifact): Long {
+    fun save(artifact: LocalCacheArtifact): LocalCacheSaveResult {
         require(artifact.goalTemplate != null || artifact.goalFingerprint != null)
         val key = artifactKey(artifact)
+        val reusableId = reusablePatternId(artifact, key)
+        if (reusableId != null) {
+            writableDatabase.execSQL(
+                "UPDATE patterns SET confidence=MAX(confidence, ?), updated_at=? WHERE id=?",
+                arrayOf<Any>(artifact.confidence, System.currentTimeMillis(), reusableId),
+            )
+            return LocalCacheSaveResult(id = reusableId, created = false)
+        }
         val values = valuesFor(artifact).apply {
             put("artifact_key", key)
             put("updated_at", System.currentTimeMillis())
@@ -153,7 +166,7 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
         if (updated == 0) {
             writableDatabase.insertOrThrow("patterns", null, values)
         }
-        return readableDatabase.query(
+        val id = readableDatabase.query(
             "patterns",
             arrayOf("id"),
             "artifact_key=?",
@@ -165,6 +178,7 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
             check(cursor.moveToFirst())
             cursor.getLong(0)
         }
+        return LocalCacheSaveResult(id = id, created = updated == 0)
     }
 
     fun listSkills(): List<PhoneSkillSummary> = readableDatabase.query(
@@ -227,12 +241,23 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
         val canonicalIntent = cursor.getString(
             cursor.getColumnIndexOrThrow("canonical_intent")
         )
+        val artifactKey = cursor.getString(cursor.getColumnIndexOrThrow("artifact_key"))
         val actions = JSONArray(
             cursor.getString(cursor.getColumnIndexOrThrow("actions_json"))
         )
+        val hasInteractiveAction = (0 until actions.length()).any { index ->
+            actions.getJSONObject(index).getString("action") in setOf("click", "set_text")
+        }
+        val storedSafety = cursor.getString(cursor.getColumnIndexOrThrow("safety"))
+        val publicSafety = if (hasInteractiveAction || storedSafety == "confirm") {
+            "confirm"
+        } else {
+            "safe"
+        }
+        val proposalId = "$canonicalIntent.${artifactKey.take(10)}"
         JSONObject()
             .put("schema_version", 1)
-            .put("id", canonicalIntent)
+            .put("id", proposalId)
             .put("version", 1)
             .put("canonical_intent", canonicalIntent)
             .put("title", canonicalIntent.replace('.', ' ').replaceFirstChar(Char::uppercase))
@@ -254,7 +279,7 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
                         cursor.getString(cursor.getColumnIndexOrThrow("source_screen")),
                     ),
             )
-            .put("safety", cursor.getString(cursor.getColumnIndexOrThrow("safety")))
+            .put("safety", publicSafety)
             .put("terminal", cursor.getInt(cursor.getColumnIndexOrThrow("terminal")) == 1)
             .put("actions", actions)
             .toString(2)
@@ -309,6 +334,69 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
         return found.singleOrNull()
     }
 
+    fun resolveById(
+        id: Long,
+        goal: String,
+        sourceScreen: String,
+        workflowParameters: Map<String, Any> = emptyMap(),
+    ): LocalCacheMatch? {
+        val normalized = normalize(goal)
+        if (normalized.isBlank()) return null
+        return readableDatabase.query(
+            "patterns",
+            null,
+            "id=? AND source_screen=? AND active=1 AND confidence>=0.90",
+            arrayOf(id.toString(), sourceScreen),
+            null,
+            null,
+            null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val template = cursor.stringOrNull("goal_template")
+            val fingerprint = cursor.stringOrNull("goal_fingerprint")
+            val typesJson = JSONObject(
+                cursor.getString(cursor.getColumnIndexOrThrow("parameter_types_json"))
+            )
+            val types = typesJson.keys().asSequence().associateWith { typesJson.getString(it) }
+            val parameters = if (workflowParameters.keys.containsAll(types.keys)) {
+                workflowParameters
+            } else {
+                match(normalized, template, fingerprint, types) ?: return null
+            }
+            val actionsJson = JSONArray(
+                cursor.getString(cursor.getColumnIndexOrThrow("actions_json"))
+            )
+            val actions = buildList {
+                for (index in 0 until actionsJson.length()) {
+                    add(
+                        substitute(
+                            DeviceAction.fromJson(actionsJson.getJSONObject(index)),
+                            parameters,
+                        )
+                    )
+                }
+            }
+            if (actions.any { action ->
+                    listOf(action.target, action.value, action.packageName, action.uri)
+                        .filterNotNull()
+                        .any { "\${" in it }
+                }
+            ) {
+                return null
+            }
+            LocalCacheMatch(
+                id = id,
+                canonicalIntent = cursor.getString(
+                    cursor.getColumnIndexOrThrow("canonical_intent")
+                ),
+                safety = cursor.getString(cursor.getColumnIndexOrThrow("safety")),
+                confidence = cursor.getDouble(cursor.getColumnIndexOrThrow("confidence")),
+                actions = actions,
+                terminal = cursor.getInt(cursor.getColumnIndexOrThrow("terminal")) == 1,
+            )
+        }
+    }
+
     fun recordOutcome(id: Long, success: Boolean) {
         val row = readableDatabase.query(
             "patterns",
@@ -354,6 +442,20 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
         put("confidence", artifact.confidence)
         put("actions_json", artifact.toJson().getJSONArray("actions").toString())
         put("terminal", if (artifact.terminal) 1 else 0)
+    }
+
+    private fun reusablePatternId(artifact: LocalCacheArtifact, artifactKey: String): Long? {
+        val actions = artifact.toJson().getJSONArray("actions").toString()
+        return readableDatabase.query(
+            "patterns",
+            arrayOf("id"),
+            "artifact_key<>? AND canonical_intent=? AND source_screen=? AND actions_json=?",
+            arrayOf(artifactKey, artifact.canonicalIntent, artifact.sourceScreen, actions),
+            null,
+            null,
+            "confidence DESC, updated_at DESC",
+            "1",
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
     }
 
     private fun artifactKey(artifact: LocalCacheArtifact): String = digest(

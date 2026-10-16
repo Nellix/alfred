@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +12,8 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from sma.execution.action_resolver import AmbiguousTarget, TargetNotFound, resolve_target
+from sma.execution.policy import ActionPolicy, PolicyViolation
 from sma.intelligence.intent_parser import IntentParser
 from sma.intelligence.model_client import (
     ChatCompletionsClient,
@@ -25,9 +29,16 @@ from sma.memory.llm_result_cache import (
     GeneralizedLLMResultCache,
     LLMCacheProvenance,
     PlannedSemanticAction,
+    safety_for_planned_action,
 )
 from sma.memory.skill_engine import Skill, render_skill_actions
-from sma.protocol.models import ActionResult, ActionStatus, CanonicalState, SemanticAction
+from sma.protocol.models import (
+    ActionResult,
+    ActionStatus,
+    CanonicalNode,
+    CanonicalState,
+    SemanticAction,
+)
 
 
 class AgentPlanRequest(BaseModel):
@@ -173,6 +184,12 @@ class AgentPlanningGateway:
             plan, response = await self.planner.plan_with_intent(request.goal, request.state)
         except ModelUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
+        plan = self._replace_premature_stop(plan, request.goal, request.state)
+        plan = self._validated_plan(plan, request.state)
+        plan = self._infer_control_parameter(plan, request.goal)
+        safety = safety_for_planned_action(plan.canonical_intent, plan.action)
+        if safety is IntentSafety.BLOCKED:
+            raise HTTPException(422, "the planned intent is blocked by policy")
         attempt_id = uuid4().hex
         self._pending[attempt_id] = _PendingAttempt(
             created_at=time.time(),
@@ -187,11 +204,208 @@ class AgentPlanningGateway:
             actions=[plan.action],
             canonical_intent=plan.canonical_intent,
             attempt_id=attempt_id,
+            confirmation_required=(
+                safety is IntentSafety.CONFIRM and not request.confirmed
+            ),
             model_calls=1,
             model_provider=response.provider,
             model_id=response.model,
-            message="The result will be generalized only after verified device execution.",
+            message=(
+                self._confirmation_message(plan, request.state)
+                if safety is IntentSafety.CONFIRM and not request.confirmed
+                else "The result will be generalized only after verified device execution."
+            ),
             terminal=plan.action.action == "stop",
+        )
+
+    @staticmethod
+    def _validated_plan(
+        plan: PlannedSemanticAction,
+        state: CanonicalState,
+    ) -> PlannedSemanticAction:
+        action = plan.action
+        node = None
+        if action.action in {"click", "set_text", "scroll"}:
+            required = {"click": "click", "set_text": "set_text", "scroll": "scroll"}[
+                action.action
+            ]
+            if not action.target:
+                raise HTTPException(422, "the model omitted the semantic action target")
+            try:
+                node = resolve_target(state, action.target, action.action).node
+            except TargetNotFound as exc:
+                raw = action.target.removeprefix("label:").strip().casefold()
+                candidates = [
+                    candidate
+                    for candidate in state.nodes
+                    if candidate.visible
+                    and required in candidate.actions
+                    and (
+                        candidate.label.casefold() == raw
+                        or (candidate.resource_id or "").casefold() == raw
+                    )
+                ]
+                if len(candidates) != 1:
+                    raise HTTPException(
+                        422,
+                        "the model selected a control absent from the current screen",
+                    ) from exc
+                node = candidates[0]
+                action = action.model_copy(update={"target": node.handle})
+            except AmbiguousTarget as exc:
+                raise HTTPException(422, "the model selected an ambiguous control") from exc
+            except ValueError as exc:
+                assert action.target is not None
+                try:
+                    selected = resolve_target(state, action.target, "").node
+                except (TargetNotFound, AmbiguousTarget, ValueError):
+                    raise HTTPException(
+                        422,
+                        "the selected control does not support that action",
+                    ) from exc
+                node = AgentPlanningGateway._nearest_actionable_node(
+                    state,
+                    selected,
+                    required,
+                )
+                if node is None:
+                    raise HTTPException(
+                        422,
+                        "the selected control does not support that action",
+                    ) from exc
+                action = action.model_copy(update={"target": node.handle})
+            stable_label = node.content_description or node.text or node.resource_id or node.role
+            action = action.model_copy(update={"target": f"label:{stable_label.strip()}"})
+        try:
+            ActionPolicy().validate(action, node)
+        except PolicyViolation as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return plan.model_copy(update={"action": action})
+
+    @staticmethod
+    def _nearest_actionable_node(
+        state: CanonicalState,
+        selected: CanonicalNode,
+        required: str,
+    ) -> CanonicalNode | None:
+        by_handle = {node.handle: node for node in state.nodes}
+        parent_handle = selected.parent_handle
+        while parent_handle is not None:
+            node = by_handle.get(parent_handle)
+            if node is None:
+                break
+            if node.visible and node.enabled and required in node.actions:
+                return node
+            parent_handle = node.parent_handle
+        candidates = [
+            candidate
+            for candidate in state.nodes
+            if candidate.visible and candidate.enabled and required in candidate.actions
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
+    @staticmethod
+    def _replace_premature_stop(
+        plan: PlannedSemanticAction,
+        goal: str,
+        state: CanonicalState,
+    ) -> PlannedSemanticAction:
+        """Reveal a requested offscreen control instead of accepting an unsupported stop."""
+        if plan.action.action != "stop":
+            return plan
+        ignored = {
+            "activate",
+            "alfred",
+            "choose",
+            "click",
+            "details",
+            "explanation",
+            "into",
+            "navigate",
+            "open",
+            "press",
+            "read",
+            "select",
+            "settings",
+            "show",
+            "then",
+        }
+        goal_terms = {
+            token
+            for token in re.findall(r"[a-z0-9]+", goal.casefold())
+            if len(token) >= 4 and token not in ignored
+        }
+        if not goal_terms:
+            return plan
+
+        def matches_goal(node: CanonicalNode) -> bool:
+            label_terms = set(re.findall(r"[a-z0-9]+", node.label.casefold()))
+            return bool(goal_terms & label_terms)
+
+        visible_matches = [node for node in state.nodes if node.visible and matches_goal(node)]
+        hidden_targets = [
+            node
+            for node in state.nodes
+            if not node.visible and node.enabled and node.actions and matches_goal(node)
+        ]
+        scroll_nodes = [
+            node
+            for node in state.nodes
+            if node.visible and node.enabled and "scroll" in node.actions
+        ]
+        if visible_matches or not hidden_targets or len(scroll_nodes) != 1:
+            return plan
+        return plan.model_copy(
+            update={
+                "action": plan.action.model_copy(
+                    update={"action": "scroll", "target": scroll_nodes[0].handle}
+                )
+            }
+        )
+
+    @staticmethod
+    def _infer_control_parameter(
+        plan: PlannedSemanticAction,
+        goal: str,
+    ) -> PlannedSemanticAction:
+        """Recover a reusable control slot when a model emitted a fixed UI label."""
+        target = plan.action.target
+        if plan.parameters or target is None or not target.startswith("label:"):
+            return plan
+        label = target.removeprefix("label:").strip()
+        reusable = label
+        for prefix in ("open ", "select ", "tap ", "click ", "choose ", "press "):
+            if reusable.casefold().startswith(prefix):
+                reusable = reusable[len(prefix) :].strip()
+                break
+        if len(reusable.split()) < 2 or reusable.casefold() not in goal.casefold():
+            return plan
+        return plan.model_copy(update={"parameters": {"control": reusable}})
+
+    @staticmethod
+    def _confirmation_message(
+        plan: PlannedSemanticAction,
+        state: CanonicalState,
+    ) -> str:
+        action = plan.action
+        action_target = action.target
+        target = (
+            f"“{action_target.removeprefix('label:')}”"
+            if action_target is not None and action_target.startswith("label:")
+            else "the selected control"
+        )
+        if action.target:
+            with contextlib.suppress(TargetNotFound, AmbiguousTarget, ValueError):
+                target = f"“{resolve_target(state, action.target, action.action).node.label}”"
+        if action.action == "click":
+            effect = f"click {target}"
+        elif action.action == "set_text":
+            effect = f"enter the requested value in {target}"
+        else:
+            effect = f"perform {action.action.replace('_', ' ')} on {target}"
+        return (
+            f"Gemini proposes to {effect}. If it succeeds, Alfred will save only a generalized "
+            "intent-to-action pattern on this phone. Continue?"
         )
 
     def outcome(self, request: AgentOutcomeRequest) -> AgentOutcomeResponse:
