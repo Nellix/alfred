@@ -137,23 +137,39 @@ internal object ClientPlannerCore {
         if (action.action !in setOf("click", "set_text", "scroll")) return action
         val target = requireNotNull(action.target) { "The model omitted the semantic target" }
         val required = action.action
-        val matches = if (target.startsWith("label:")) {
+        val selected = if (target.startsWith("label:")) {
             val label = target.removePrefix("label:").trim()
             snapshot.nodes.filter {
-                it.visible && it.enabled && required in it.actions && it.label.equals(label, true)
+                it.visible && it.enabled && it.label.equals(label, true)
             }
         } else {
             snapshot.nodes.filter {
-                it.handle == target && it.visible && it.enabled && required in it.actions
+                it.handle == target && it.visible && it.enabled
             }
         }
+        require(selected.none { it.sensitivity in setOf("secret", "excluded") }) {
+            "Actions on sensitive controls are blocked"
+        }
+        val byHandle = snapshot.nodes.associateBy { it.handle }
+        val matches = selected.mapNotNull { node ->
+            var candidate: SemanticNode? = node
+            while (candidate != null) {
+                if (candidate.visible && candidate.enabled && required in candidate.actions) {
+                    break
+                }
+                candidate = candidate.parentHandle?.let(byHandle::get)
+            }
+            candidate
+        }.distinctBy { it.handle }
         require(matches.size == 1) { "The model selected a missing or ambiguous control" }
         val node = matches.single()
         require(node.sensitivity !in setOf("secret", "excluded")) {
             "Actions on sensitive controls are blocked"
         }
         val label = node.label.trim()
-        val uniqueLabel = label.isNotEmpty() && label.length <= 120 && '\n' !in label &&
+        val hasSemanticLabel = sequenceOf(node.contentDescription, node.text, node.resourceId)
+            .any { !it.isNullOrBlank() }
+        val uniqueLabel = hasSemanticLabel && label.isNotEmpty() && label.length <= 120 && '\n' !in label &&
             snapshot.nodes.count { it.visible && it.label.equals(label, true) } == 1
         return if (uniqueLabel) action.copy(target = "label:$label") else action.copy(target = node.handle)
     }
