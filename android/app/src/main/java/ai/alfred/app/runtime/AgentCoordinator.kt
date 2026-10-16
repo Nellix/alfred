@@ -37,12 +37,13 @@ class AgentCoordinator(
         var goalTemplate: String? = null,
         var goalFingerprint: String? = null,
         var parameterTypes: Map<String, String> = emptyMap(),
+        var publicWorkflow: PublicWorkflowCursor? = null,
     )
 
     private data class PendingRemoteConfirmation(
         val goal: String,
         val plan: RemotePlan,
-        val client: BackendClient,
+        val client: PlanningClient,
         val totalModelCalls: Int,
         val step: Int,
         val learning: LearningSession,
@@ -269,6 +270,23 @@ class AgentCoordinator(
             return
         }
         if (mode != InferenceMode.CLOUD_FIRST) {
+            learning.publicWorkflow?.let { cursor ->
+                val publicStep = githubSkills.nextWorkflowStep(cursor, snapshot.screenId)
+                if (publicStep != null) {
+                    executePublicWorkflowStep(
+                        publicStep,
+                        goal,
+                        confirmed,
+                        totalModelCalls,
+                        step,
+                        learning,
+                        service,
+                        snapshot.screenId,
+                    )
+                    return
+                }
+                learning.publicWorkflow = null
+            }
             val workflowStep = workflows.nextPhoneStep(learning.workflow, snapshot.screenId)
             val workflowLocal = workflowStep?.let {
                 localCache.resolveById(
@@ -363,6 +381,20 @@ class AgentCoordinator(
                 return
             }
             val downloaded = githubSkills.resolve(goal, snapshot.screenId)
+            val downloadedWorkflow = githubSkills.resolveWorkflow(goal, snapshot.screenId)
+            if (downloadedWorkflow != null) {
+                executePublicWorkflowStep(
+                    downloadedWorkflow,
+                    goal,
+                    confirmed,
+                    totalModelCalls,
+                    step,
+                    learning,
+                    service,
+                    snapshot.screenId,
+                )
+                return
+            }
             if (downloaded != null) {
                 if (downloaded.safety == "confirm" && !confirmed) {
                     pendingDeviceConfirmation = PendingDeviceConfirmation(
@@ -411,18 +443,21 @@ class AgentCoordinator(
             events.onFailure("This request is not in the local catalog or phone cache. Change inference mode or teach a pattern first.")
             return
         }
-        events.onThinking("Phone cache missed — checking your planner…")
-        val endpoint = preferences.getString("backend_url", "http://127.0.0.1:8765")!!
+        events.onThinking("No verified edge matched — Alfred is planning one missing step…")
         val profileId = preferences.getString("profile_id", null) ?: java.util.UUID.randomUUID()
             .toString()
             .also { preferences.edit().putString("profile_id", it).apply() }
-        val client = try {
-            BackendClient(endpoint)
-        } catch (error: IllegalArgumentException) {
-            finishWorkflow(learning, totalModelCalls, success = false)
-            events.onFailure(error.message ?: "Invalid backend URL")
-            return
+        val recentSummary = learning.workflow.trace.takeLast(5).joinToString(" → ") {
+            "${it.canonicalIntent ?: it.actionKinds} (${it.sourceScreen} → ${it.destinationScreen})"
         }
+        val hints = (localCache.plannerHints(goal, snapshot.screenId, 3) +
+            githubSkills.plannerHints(goal, snapshot.screenId, 3)).distinct().take(5)
+        val client: PlanningClient = ClientPlanner(
+            context = app,
+            preferences = preferences,
+            recentSummary = recentSummary,
+            skillHints = hints,
+        )
         client.plan(goal, snapshot, confirmed, profileId) { result ->
             main.post {
                 result.fold(
@@ -474,11 +509,65 @@ class AgentCoordinator(
                     },
                     onFailure = { error ->
                         finishWorkflow(learning, totalModelCalls, success = false)
-                        events.onFailure("The planner is unavailable: ${error.message}")
+                        events.onFailure("The on-device planner could not fill this edge: ${error.message}")
                     },
                 )
             }
         }
+    }
+
+    private fun executePublicWorkflowStep(
+        workflowStep: GitHubWorkflowStep,
+        goal: String,
+        confirmed: Boolean,
+        totalModelCalls: Int,
+        step: Int,
+        learning: LearningSession,
+        service: SemanticAccessibilityService,
+        sourceScreen: String,
+    ) {
+        learning.publicWorkflow = if (workflowStep.terminal) null else workflowStep.cursor
+        val skillRef = "github-workflow:${workflowStep.cursor.workflowId}:" +
+            "${workflowStep.cursor.version}:${workflowStep.nodeId}"
+        if (workflowStep.safety == "confirm" && !confirmed) {
+            pendingDeviceConfirmation = PendingDeviceConfirmation(
+                goal,
+                workflowStep.actions,
+                totalModelCalls,
+                null,
+                !workflowStep.terminal,
+                step,
+                learning,
+                sourceScreen,
+                workflowStep.cursor.workflowId,
+                skillRef,
+                false,
+            )
+            showDeviceConfirmation(
+                goal,
+                "The reviewed workflow “${workflowStep.title}” proposes to " +
+                    "${describeAction(workflowStep.actions.first())}. Continue?",
+                !events.assistantIsForeground(),
+            )
+            return
+        }
+        events.onActing("Following reviewed GitHub workflow · ${workflowStep.title}")
+        executeActions(
+            service = service,
+            actions = workflowStep.actions,
+            totalModelCalls = totalModelCalls,
+            attemptId = null,
+            client = null,
+            localArtifact = null,
+            localPatternId = null,
+            goal = goal,
+            continueAfter = !workflowStep.terminal,
+            step = step,
+            learning = learning,
+            sourceScreen = sourceScreen,
+            canonicalIntent = workflowStep.cursor.workflowId,
+            skillRef = skillRef,
+        )
     }
 
     private fun showRemoteConfirmation(
@@ -627,7 +716,7 @@ class AgentCoordinator(
         actions: List<DeviceAction>,
         totalModelCalls: Int,
         attemptId: String?,
-        client: BackendClient?,
+        client: PlanningClient?,
         localArtifact: LocalCacheArtifact?,
         localPatternId: Long?,
         goal: String,
@@ -717,7 +806,11 @@ class AgentCoordinator(
                         service.execute(DeviceAction("launch_app", packageName = app.packageName)) {
                             returned ->
                             main.post {
-                                if (returned.success) {
+                                if (
+                                    returned.success ||
+                                    service.snapshot()?.packageName == app.packageName ||
+                                    events.assistantIsForeground()
+                                ) {
                                     announceCompletion()
                                 } else {
                                     events.onFailure(

@@ -1,91 +1,96 @@
 # Model providers
 
-Alfred calls a model only after built-in actions, the on-device generalized cache, and downloaded
-GitHub skills all miss. Providers are tried in the order declared by `LLM_PROVIDER_CHAIN`. API keys
-never enter the Android app.
+Alfred calls a model only after its workflow graph, built-in actions, private generalized cache,
+and downloaded GitHub skills all miss. Planning logic stays in the Android app; no Alfred backend
+is required.
 
-The recommended chain is:
+The client provider order is fixed and intentional:
 
-```bash
-LLM_PROVIDER_CHAIN=gemini,openrouter
+1. Gemini;
+2. OpenRouter.
+
+If Gemini rejects credentials, exhausts quota, is unavailable, or returns an invalid action,
+Alfred tries OpenRouter. If both providers fail, the current workflow stops with a sanitized error
+and no unverified edge is learned.
+
+## Configuration
+
+Open **Settings → Inference** and enter one or both provider keys. The key fields are write-only:
+after saving, the UI reports that a key exists but never displays it again. Keys are AES-GCM
+encrypted with a non-exportable Android Keystore key. Removing the saved model keys deletes both
+encrypted values.
+
+The defaults are:
+
+```text
+Gemini:    gemini-3.5-flash-lite
+OpenRouter: openrouter/free
 ```
 
-Gemini handles the first request. Authentication, quota/credit, rate-limit, transport, invalid
-response-envelope, or provider errors advance to OpenRouter. If every provider fails, Android gets
-one sanitized unavailable error. Add `custom` at the end only when a local server is configured:
+Model names remain editable because free-tier availability and quotas can change. At least one key
+is needed only for novel edges; every deterministic and learned route continues to work without
+provider configuration.
 
-```bash
-LLM_PROVIDER_CHAIN=gemini,openrouter,custom
-```
+## What a provider receives
 
-## Gemini free tier (recommended for development)
+For one unknown edge the app sends:
 
-Create a key in Google AI Studio and start the planner with:
+- the authorized user goal;
+- current package and stable semantic screen ID;
+- up to 80 visible, non-secret semantic controls;
+- a compact summary of at most five verified workflow steps;
+- at most five relevant private/public skill descriptions selected locally.
 
-```bash
-LLM_PROVIDER_CHAIN=gemini,openrouter \
-GEMINI_API_KEY='...' \
-GEMINI_MODEL=gemini-3.5-flash-lite \
-OPENROUTER_API_KEY='...' \
-OPENROUTER_MODEL=openrouter/free \
-.venv/bin/sma serve --host 127.0.0.1 --port 8765
-```
+The app does not send screenshots, the complete accessibility tree, the full skill registry,
+stored workflow graphs, GitHub credentials, Gmail body text, or provider keys belonging to another
+provider.
 
-The implementation uses Google's native `generateContent` endpoint with JSON-schema-constrained
-output and identifies itself with `x-goog-api-client`. `gemini-3.5-flash-lite` is the development default because Google
-currently lists free-tier input and output for it. Quotas vary by project and model and should be
-checked in AI Studio. A `429` is returned to Android as a free-tier rate-limit error.
+## Structured response and local enforcement
+
+Both requests require a JSON-schema result containing a canonical intent, typed parameters, and
+exactly one proposed semantic action. The Android client then independently:
+
+1. rejects blocked intents and unsupported actions;
+2. resolves interactive handles against the current reduced screen;
+3. rejects missing, ambiguous, destructive, or sensitive targets;
+4. converts unique targets to stable semantic labels;
+5. asks for confirmation before clicks and text entry;
+6. reacquires the live accessibility node and executes the action;
+7. verifies a semantic screen change;
+8. saves a parameterized local artifact only after success.
+
+The model is a constrained gap-filler, not the authority that executes or learns an action.
+
+## Gemini
+
+The client uses Google's native `generateContent` endpoint with JSON-schema-constrained output and
+the API key in the `x-goog-api-key` header. Create a development key in Google AI Studio and paste
+it into Alfred Settings. Quotas vary by account, project, and model.
 
 Official references: [Gemini API](https://ai.google.dev/gemini-api/docs),
 [structured output](https://ai.google.dev/gemini-api/docs/structured-output),
 [pricing](https://ai.google.dev/gemini-api/docs/pricing), and
 [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits).
 
-## OpenRouter free tier
+## OpenRouter
 
-```bash
-LLM_PROVIDER_CHAIN=openrouter \
-OPENROUTER_API_KEY='...' \
-OPENROUTER_MODEL=openrouter/free \
-OPENROUTER_APP_NAME=Alfred \
-.venv/bin/sma serve --host 127.0.0.1 --port 8765
-```
-
-`openrouter/free` lets OpenRouter choose an available free model. Alfred sends
-`provider.require_parameters=true` with its JSON Schema, preventing routing to an endpoint that does
-not support the structured output required for safe action validation. A specific `:free` model can
-be pinned with `OPENROUTER_MODEL`, but free-model availability changes over time.
-
-`OPENROUTER_SITE_URL` is optional and adds the documented `HTTP-Referer` attribution header. The
-backend always sends `X-OpenRouter-Title`.
+The default `openrouter/free` route lets OpenRouter select an available free model. Alfred requests
+strict structured output and sets `provider.require_parameters=true`, preventing routing to a
+provider that cannot honor the required schema. A specific compatible model can be entered in
+Settings instead.
 
 Official references: [free models](https://openrouter.ai/collections/free-models/),
 [structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs), and
 [pricing/rate limits](https://openrouter.ai/pricing/).
 
-## Local or custom server
+## Privacy note
 
-The original local-model route remains available for offline/private installations:
+Free hosted tiers can have different retention or model-improvement terms. Do not use them for
+confidential screens. Alfred locally redacts secret/excluded controls, and Gmail message bodies are
+handled by the separate on-device briefing path and never enter this planner.
 
-```bash
-LLM_PROVIDER_CHAIN=custom \
-LLM_BASE_URL=http://127.0.0.1:8000/v1 \
-LLM_MODEL=your-local-model \
-LLM_API_KEY=local \
-.venv/bin/sma serve --host 127.0.0.1 --port 8765
-```
+## Python reference gateway
 
-## Privacy and learning boundary
-
-On a cache miss the selected provider receives the user's current goal and the reduced, redacted
-semantic UI state. It does not receive screenshots, the complete accessibility tree, GitHub write
-credentials, or stored private skill artifacts. Gemini's free-tier
-pricing page currently states that free-tier content may be used to improve Google products;
-OpenRouter's data handling depends on the selected routed provider. Do not use a free shared model
-for confidential screens. Banking, authentication, password-manager, wallet, OTP, and payment-like
-content remain excluded or locally redacted.
-
-The returned JSON is parsed into the strict semantic-action schema and still passes Android policy,
-confirmation, live-node reacquisition, and post-action verification. It is learned only after a
-verified successful execution. A later parameterized variation then resolves from the private cache
-with zero model calls.
+The repository still contains the original FastAPI planning gateway and provider clients for
+protocol tests, replay experiments, and comparison during migration. It is not used by the Android
+application and is not part of the runtime architecture.

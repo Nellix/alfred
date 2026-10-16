@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
+import org.json.JSONArray
 import java.security.MessageDigest
 import java.text.Normalizer
 import java.util.Locale
@@ -178,6 +179,119 @@ class WorkflowStore(context: Context) : SQLiteOpenHelper(
         "id=?",
         arrayOf(id.toString()),
     ) == 1
+
+    /** Builds a privacy-safe public graph only when every referenced phone skill is exportable. */
+    fun contributionProposal(id: Long, cache: LocalSemanticCache): String? {
+        val recipe = readableDatabase.query(
+            "workflow_recipes", null, "id=?", arrayOf(id.toString()), null, null, null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val templateIndex = cursor.getColumnIndexOrThrow("goal_template")
+            if (cursor.isNull(templateIndex)) return null
+            Triple(
+                cursor.getString(templateIndex),
+                cursor.getString(cursor.getColumnIndexOrThrow("parameter_types_json")),
+                cursor.getInt(cursor.getColumnIndexOrThrow("successes")),
+            )
+        }
+        if (recipe.third < 1) return null
+        data class ExportNode(
+            val id: Long,
+            val parentId: Long?,
+            val sourceScreen: String,
+            val skillRef: String,
+            val terminal: Boolean,
+        )
+        val storedNodes = readableDatabase.query(
+            "workflow_nodes",
+            arrayOf("id", "parent_node_id", "source_screen", "skill_ref", "terminal"),
+            "recipe_id=?",
+            arrayOf(id.toString()),
+            null,
+            null,
+            "id",
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        ExportNode(
+                            id = cursor.getLong(0),
+                            parentId = if (cursor.isNull(1)) null else cursor.getLong(1),
+                            sourceScreen = cursor.getString(2),
+                            skillRef = cursor.getString(3),
+                            terminal = cursor.getInt(4) == 1,
+                        )
+                    )
+                }
+            }
+        }
+        val roots = storedNodes.filter { it.parentId == null }
+        if (roots.size != 1 || storedNodes.isEmpty()) return null
+        val actionsByNode = storedNodes.associate { node ->
+            val patternId = node.skillRef.removePrefix(PHONE_PREFIX)
+                .takeIf { node.skillRef.startsWith(PHONE_PREFIX) }
+                ?.toLongOrNull()
+                ?: return null
+            val skill = cache.contributionProposal(patternId)?.let(::JSONObject) ?: return null
+            node.id to skill.getJSONArray("actions")
+        }
+        val nodeIds = storedNodes.map { it.id }.toSet()
+        if (storedNodes.any { it.parentId != null && it.parentId !in nodeIds }) return null
+        val publicSafety = if (actionsByNode.values.any { actions ->
+                (0 until actions.length()).any { index ->
+                    actions.getJSONObject(index).getString("action") in setOf("click", "set_text")
+                }
+            }) "confirm" else "safe"
+        val canonicalIntent = storedNodes.firstNotNullOfOrNull { node ->
+            val patternId = node.skillRef.removePrefix(PHONE_PREFIX).toLongOrNull()
+            patternId?.let(cache::contributionProposal)?.let(::JSONObject)
+                ?.optString("canonical_intent")?.takeIf(String::isNotBlank)
+        } ?: "community.workflow"
+        val proposalId = "community.workflow.${digest(recipe.first).take(12)}"
+        val nodes = JSONArray()
+        storedNodes.forEach { node ->
+            val children = storedNodes.filter { it.parentId == node.id }
+            if ((node.terminal && children.isNotEmpty()) || (!node.terminal && children.isEmpty())) {
+                return null
+            }
+            nodes.put(
+                JSONObject()
+                    .put("id", "step-${node.id}")
+                    .put("source_screen", generalizedScreen(node.sourceScreen))
+                    .put("actions", actionsByNode.getValue(node.id))
+                    .put("children", JSONArray(children.map { "step-${it.id}" }))
+                    .put("terminal", node.terminal)
+            )
+        }
+        val replayModelCalls = readableDatabase.rawQuery(
+            "SELECT MIN(model_calls) FROM workflow_runs WHERE recipe_id=? AND status='success'",
+            arrayOf(id.toString()),
+        ).use { cursor -> if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getInt(0) else 0 }
+        return JSONObject()
+            .put("schema_version", 1)
+            .put("id", proposalId)
+            .put("version", 1)
+            .put("canonical_intent", canonicalIntent)
+            .put("title", canonicalIntent.replace('.', ' ').replaceFirstChar(Char::uppercase))
+            .put("description", "Generalized workflow proposed from verified on-device execution.")
+            .put(
+                "match",
+                JSONObject()
+                    .put("goal_template", recipe.first)
+                    .put("parameter_types", JSONObject(recipe.second)),
+            )
+            .put("safety", publicSafety)
+            .put("entry_node", "step-${roots.single().id}")
+            .put("nodes", nodes)
+            .put(
+                "verification",
+                JSONObject()
+                    .put("status", "device_verified")
+                    .put("verified_runs", recipe.third)
+                    .put("replay_model_calls", replayModelCalls),
+            )
+            .toString(2)
+    }
 
     fun clearAll(): Int {
         writableDatabase.beginTransaction()
@@ -478,6 +592,12 @@ class WorkflowStore(context: Context) : SQLiteOpenHelper(
     private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray())
         .joinToString("") { "%02x".format(it) }
+
+    private fun generalizedScreen(value: String): String {
+        if (value == "*" || value.endsWith(":*")) return value
+        val segments = value.split(':')
+        return if (segments.size >= 3) segments.dropLast(1).joinToString(":") + ":*" else value
+    }
 
     companion object {
         const val PHONE_PREFIX = "phone:"

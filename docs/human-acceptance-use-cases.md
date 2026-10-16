@@ -34,8 +34,9 @@ navigation or choose transport on the user's behalf.
 
 Say **Open YouTube and play lo-fi music**.
 
-Expected: YouTube search results open. If no local skill matches the next screen, Alfred consults the
-optional planner; without one it reports a clear, recoverable planner-unavailable message.
+Expected: YouTube search results open. If no local skill matches the next screen, Alfred's client
+planner requests one missing edge from a configured provider; without a saved key it reports a
+clear, recoverable configuration message.
 
 ## HU-05 — Pull reviewed GitHub skills
 
@@ -43,7 +44,8 @@ optional planner; without one it reports a clear, recoverable planner-unavailabl
 2. Tap **Pull latest from GitHub**.
 3. Reopen the library after completion.
 
-Expected: revision, refresh time, and downloaded skills appear. Each listed skill can be disabled.
+Expected: revision, refresh time, downloaded skills, and downloaded workflows appear. Each listed
+artifact can be disabled.
 No account sign-in, PostgreSQL server, or skill API is contacted.
 
 ## HU-06 — Preserve catalog on refresh failure
@@ -71,13 +73,13 @@ Expected: Alfred refuses with a local-catalog/cache miss. No planner request occ
 
 ## HU-09 — Planner fallback and provider failover
 
-1. Run the optional planner with Gemini and OpenRouter configured.
+1. Save Gemini and OpenRouter development keys in Alfred Settings.
 2. Keep Alfred on **Auto** and use a novel, safe task.
-3. Repeat with the first provider deliberately unavailable or quota-limited.
+3. Repeat with the Gemini key unavailable or quota-limited.
 
-Expected: a local miss reaches the planner. Valid structured output is executed only after Android
-safety checks. The provider chain advances to OpenRouter when the Gemini call has a supported
-availability/quota failure; if all fail, Alfred shows one sanitized error.
+Expected: a local miss reaches the planner running inside Android. Valid structured output is
+executed only after client-side safety checks. The provider chain advances to OpenRouter when the
+Gemini call fails or returns an invalid plan; if all fail, Alfred shows one sanitized error.
 
 ## HU-10 — Learn and reuse a verified action
 
@@ -162,3 +164,17 @@ Expected: the first run uses cached/built-in sub-skills where possible and calls
 for unknown edges. The completed trace appears as one workflow whose nodes reference reusable
 sub-skills. The second run says it is following learned workflow edges and makes zero LLM calls.
 Disabling the workflow forces normal routing; deleting it leaves the component phone skills intact.
+
+## HU-20 — Publish and consume a reviewed workflow
+
+1. Complete and replay a generalized learned workflow successfully.
+2. In **Skill Library → Learned workflows**, tap **Prepare workflow GitHub PR**.
+3. Review the copied graph and open a pull request in `alfred-skills`.
+4. After review/merge and a revision bump, pull the catalog on a second device.
+5. Temporarily disable any duplicate private pattern and run the workflow's goal.
+
+Expected: the proposal contains semantic screen prefixes, labels, typed placeholders, graph edges,
+and verification counts, but no raw prompt or concrete user value. The second device displays the
+reviewed workflow and can disable it independently. Replay requests confirmation for interactive
+nodes, follows one unambiguous screen branch, and completes with zero LLM calls. A missing or
+ambiguous branch falls back to normal routing instead of guessing.

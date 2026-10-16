@@ -11,8 +11,8 @@ audit.
 - The live accessibility node is reacquired before execution; stale or ambiguous matches fail.
 - Post-action state is checked before a model result is eligible for learning.
 - Message sends, deletion, purchases, payments, transfers, installs, uninstalls, and factory reset
-  targets are rejected in downloaded skills.
-- Interactive downloaded skills are confirmation-gated even if their document declares otherwise.
+  targets are rejected in downloaded skills and workflow nodes.
+- Interactive downloaded skills/workflows are confirmation-gated even if their document declares otherwise.
 - Local patterns lose confidence after failures and disable after repeated failure.
 
 These controls reduce risk; they do not make arbitrary automation safe. Production releases need a
@@ -25,12 +25,14 @@ uploaded. The application can export a parameterized proposal only after an expl
 then reviews and submits it through GitHub.
 
 Raw prompts, parameter values, contacts, destinations, messages, screenshots, and accessibility
-dumps must never enter the public skill repository. Public skills contain only generalized templates,
+dumps must never enter the public skill repository. Public skills and workflows contain only generalized templates,
 typed placeholders, bounded actions, and documentation.
 
-The optional planner receives a goal and reduced semantic UI state only on a local miss. API keys
-stay in its process environment. Free hosted model tiers may retain or train on submitted data under
-their own terms, so do not use them for confidential screens.
+The Android client planner contacts a configured model only on a local miss. It sends a goal,
+reduced semantic UI state, compact verified path, and at most five relevant skill descriptions—not
+the complete private cache or workflow graph. BYOK provider keys are encrypted at rest with Android
+Keystore and are sent only to the corresponding provider. Free hosted model tiers may retain or
+train on submitted data under their own terms, so do not use them for confidential screens.
 
 Gmail inbox-row briefing does not open messages. Message-body summary requires explicit confirmation,
 processes visible text on the phone, and does not log, learn, publish, or send body text to a model.

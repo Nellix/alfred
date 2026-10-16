@@ -15,7 +15,7 @@ verified repetitions into reusable, parameterized skills and resolves every requ
 2. personal skills learned and stored only on the phone;
 3. reviewed public skills downloaded from
    [`alfred-skills`](https://github.com/Nellix/alfred-skills);
-4. an optional LLM planner, with Gemini → OpenRouter → custom/local failover.
+4. the Android client planner for one unknown edge, with Gemini → OpenRouter failover.
 
 A successful model-generated action can become a generalized on-device template, so the next
 matching request uses zero model calls. Personal prompts and slot values are not published. Sharing
@@ -32,13 +32,14 @@ a generalized skill is an explicit GitHub pull request.
 - A private SQLite semantic cache for self-improving personal patterns.
 - An on-device task generator that learns verified workflow graphs and reuses their component
   sub-skills; only an unknown graph edge falls through to the LLM.
-- A direct, digest-verified GitHub skill catalog with refresh, enable/disable, and contribution UI.
-- An optional Python planner for novel requests. Model credentials stay outside the APK.
+- A direct, digest-verified GitHub skill/workflow catalog with refresh, enable/disable, and contribution UI.
+- An Android-resident planner for novel edges, with Keystore-encrypted BYOK credentials.
+- A Python planning gateway retained as a development reference and protocol test harness.
 - Deterministic replay fixtures and tests for routing, safety, caching, and token reduction.
 
 Alfred does **not** require Docker, Kubernetes, PostgreSQL, or a hosted skill-management API. GitHub
-is the reviewed public control plane; the phone is the private personal-skill store. Only the
-optional LLM planner is a network service.
+is the reviewed public control plane; the phone is the private personal-skill store. On a miss, the
+phone can call the selected model provider directly without an Alfred backend.
 
 ## Architecture
 
@@ -47,10 +48,10 @@ voice/text goal
       |
       v
 Android app
-  workflow edge -> built-ins -> personal phone cache -> GitHub skills -> optional LLM planner
+  active workflow edge -> built-ins -> personal phone cache -> GitHub workflows/skills -> client planner
       |                |                       |                         |
-      |          private SQLite       static JSON + SHA-256       Gemini/OpenRouter/
-      |                                   from GitHub               local endpoint
+      |          private SQLite       static JSON + SHA-256       Gemini -> OpenRouter
+      |                                   from GitHub              unknown edge only
       v
 bounded semantic actions -> Android AccessibilityService -> post-action verification
 ```
@@ -69,24 +70,18 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Open Alfred, grant microphone permission, and enable **Alfred Device Actions** in Android
-Accessibility settings. The built-in routes, local cache, and downloaded GitHub skills do not need
-the Python planner.
+Accessibility settings. The built-in routes, local cache, and downloaded GitHub skills need no
+model key or Python service.
 
-## Optional LLM planner
+## Optional model fallback
 
-The planner is used only after local routes and skills miss. It keeps API keys off the phone.
+Planning logic runs in the Android app. In **Settings → Inference**, optionally enter a Gemini key
+and an OpenRouter key. Android Keystore encrypts both at rest. Gemini is tried first and OpenRouter
+is used when Gemini is unavailable, quota-limited, or returns an invalid plan.
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-cp .env.example .env
-# Add at least one provider key to .env, then export/load those values.
-.venv/bin/sma serve --host 127.0.0.1 --port 8765
-adb reverse tcp:8765 tcp:8765
-```
-
-The default provider order is Gemini, then OpenRouter. A compatible local endpoint can be appended
-as `custom`. See [Model providers](docs/model-providers.md).
+Only the goal, a bounded redacted semantic screen, the recent verified path, and at most five
+relevant skill hints are sent. The model supplies one missing edge; Android validates, confirms,
+executes, verifies, and learns it locally. See [Model providers](docs/model-providers.md).
 
 ## Development checks
 
@@ -116,8 +111,8 @@ python3 scripts/build_registry.py --check
 
 ## Project status
 
-The core routing, Android frontend, local learning, GitHub catalog client, Gmail briefing paths, and
-optional planner are implemented. Production work still includes signed release manifests,
+The core routing, Android frontend, client planner, local learning, GitHub catalog client, and Gmail
+briefing paths are implemented. Production work still includes signed release manifests,
 stronger publisher governance, broader device/application testing, accessibility hardening, and a
 formal security review.
 

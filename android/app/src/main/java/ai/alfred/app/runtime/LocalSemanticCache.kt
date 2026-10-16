@@ -75,6 +75,24 @@ data class LocalCacheMatch(
     val terminal: Boolean,
 )
 
+internal fun semanticLocalMatchKey(match: LocalCacheMatch): String = buildString {
+    append(match.canonicalIntent)
+    append('|')
+    append(match.safety)
+    append('|')
+    append(match.terminal)
+    match.actions.forEach { action ->
+        append('|')
+        append(action.action)
+        when (action.action) {
+            "launch_app" -> append(":${action.packageName}")
+            "open_deep_link" -> append(":${action.packageName}:${action.uri}")
+            "click", "scroll" -> append(":${action.target}")
+            "set_text" -> append(":${action.target}:${action.value}")
+        }
+    }
+}
+
 data class PhoneSkillSummary(
     val id: Long,
     val canonicalIntent: String,
@@ -227,6 +245,36 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
         }
     }
 
+    /** Compact, privacy-safe metadata for an LLM call after exact local matching has failed. */
+    fun plannerHints(goal: String, sourceScreen: String, limit: Int = 3): List<String> {
+        val goalTokens = normalize(goal).lowercase(Locale.ROOT)
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 3 }
+            .toSet()
+        return readableDatabase.query(
+            "patterns",
+            arrayOf("canonical_intent", "goal_template", "source_screen", "confidence"),
+            "active=1 AND confidence>=0.90",
+            null,
+            null,
+            null,
+            "confidence DESC, updated_at DESC",
+            "40",
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    val intent = cursor.getString(0)
+                    val template = cursor.stringOrNull("goal_template")
+                    val screen = cursor.getString(2)
+                    val searchable = "$intent ${template.orEmpty()}".lowercase(Locale.ROOT)
+                    val score = goalTokens.count(searchable::contains) +
+                        if (screen == sourceScreen) 2 else 0
+                    if (score > 0) add(score to "private:$intent · ${template ?: "exact request"}")
+                }
+            }.sortedByDescending { it.first }.take(limit).map { it.second }
+        }
+    }
+
     fun contributionProposal(id: Long): String? = readableDatabase.query(
         "patterns",
         null,
@@ -331,7 +379,8 @@ class LocalSemanticCache(context: Context) : SQLiteOpenHelper(context, "semantic
                 )
             }
         }
-        return found.singleOrNull()
+        val equivalentGroups = found.groupBy(::semanticLocalMatchKey)
+        return equivalentGroups.values.singleOrNull()?.maxByOrNull { it.confidence }
     }
 
     fun resolveById(
