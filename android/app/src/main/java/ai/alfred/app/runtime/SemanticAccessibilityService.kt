@@ -1,10 +1,12 @@
 package ai.alfred.app.runtime
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.accessibilityservice.AccessibilityService.ScreenshotResult
 import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Path
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
@@ -85,6 +87,37 @@ class SemanticAccessibilityService : AccessibilityService() {
         )
     }
 
+    /**
+     * Verifies a messaging draft entirely on device. Raw draft text is compared against the live
+     * accessibility tree and is never copied into a snapshot, log, learned skill, or model prompt.
+     */
+    fun verifyMessagingDraft(request: MessagingDraftIntent): Boolean {
+        val root = rootInActiveWindow ?: return false
+        if (root.packageName?.toString() != request.packageName) return false
+        var recipientVisible = false
+        var exactDraftVisible = false
+
+        fun visit(node: AccessibilityNodeInfo) {
+            val text = node.text?.toString()?.trim().orEmpty()
+            val description = node.contentDescription?.toString()?.trim().orEmpty()
+            if (
+                text.equals(request.recipient, ignoreCase = true) ||
+                description.equals(request.recipient, ignoreCase = true)
+            ) {
+                recipientVisible = true
+            }
+            if (node.isEditable && text == request.message) {
+                exactDraftVisible = true
+            }
+            for (index in 0 until node.childCount) {
+                node.getChild(index)?.let(::visit)
+            }
+        }
+
+        visit(root)
+        return recipientVisible && exactDraftVisible
+    }
+
     private fun resolvedWindowClass(
         packageName: String,
         nodes: List<SemanticNode>,
@@ -102,6 +135,12 @@ class SemanticAccessibilityService : AccessibilityService() {
 
     fun execute(action: DeviceAction, callback: (ActionOutcome) -> Unit) {
         execute(action, callback, revealAttempts = 0, revealScrollAction = null)
+    }
+
+    fun canResolve(action: DeviceAction): Boolean = when (action.action) {
+        "click", "set_text", "scroll" ->
+            action.target?.let { findNode(it, action.action) } != null
+        else -> true
     }
 
     private fun execute(
@@ -509,7 +548,7 @@ class SemanticAccessibilityService : AccessibilityService() {
             val target = requireNotNull(action.target) { "Missing semantic target" }
             val node = findNode(target, action.action) ?: return false
             when (action.action) {
-                "click" -> node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                "click" -> clickSemanticNode(node)
                 "set_text" -> node.performAction(
                     AccessibilityNodeInfo.ACTION_SET_TEXT,
                     Bundle().apply {
@@ -523,6 +562,21 @@ class SemanticAccessibilityService : AccessibilityService() {
             }
         }
         else -> false
+    }
+
+    private fun clickSemanticNode(node: AccessibilityNodeInfo): Boolean {
+        if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N || !node.isVisibleToUser) return false
+        val bounds = Rect().also(node::getBoundsInScreen)
+        if (bounds.isEmpty) return false
+        val path = Path().apply { moveTo(bounds.exactCenterX(), bounds.exactCenterY()) }
+        return dispatchGesture(
+            GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0L, 80L))
+                .build(),
+            null,
+            null,
+        )
     }
 
     private fun findScrollableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -578,7 +632,7 @@ class SemanticAccessibilityService : AccessibilityService() {
                 handle == target
             }
             val supportsAction = when (action) {
-                "click" -> node.isClickable
+                "click" -> node.isClickable || node.isCheckable
                 "set_text" -> node.isEditable
                 "scroll" -> node.isScrollable
                 else -> false
@@ -758,7 +812,7 @@ class SemanticAccessibilityService : AccessibilityService() {
         val description = if (secret || personal) null else rawDescription
         val bounds = Rect().also(node::getBoundsInScreen)
         val actions = buildList {
-            if (node.isClickable) add("click")
+            if (node.isClickable || node.isCheckable) add("click")
             if (node.isEditable) add("set_text")
             if (node.isScrollable) add("scroll")
         }
@@ -776,7 +830,7 @@ class SemanticAccessibilityService : AccessibilityService() {
             className = className,
             text = text,
             contentDescription = description,
-            clickable = node.isClickable,
+            clickable = node.isClickable || node.isCheckable,
             editable = node.isEditable,
             scrollable = node.isScrollable,
             enabled = node.isEnabled,

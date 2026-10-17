@@ -32,6 +32,7 @@ class AgentCoordinator(
 
     private data class LearningSession(
         val workflow: WorkflowSession,
+        val messagingDraft: MessagingDraftIntent? = null,
         val publishableSkillIds: LinkedHashSet<Long> = linkedSetOf(),
         val names: LinkedHashSet<String> = linkedSetOf(),
         var goalTemplate: String? = null,
@@ -101,13 +102,17 @@ class AgentCoordinator(
             runMailRecap(mailRequest)
             return
         }
+        val messagingDraft = MessagingDraftIntent.parse(goal)
         route(
             goal,
             confirmed,
             step = 0,
             totalModelCalls = 0,
             allowNative = true,
-            learning = LearningSession(workflows.begin(goal)),
+            learning = LearningSession(
+                workflow = workflows.begin(goal),
+                messagingDraft = messagingDraft,
+            ),
         )
     }
 
@@ -242,7 +247,10 @@ class AgentCoordinator(
             InferenceMode.valueOf(preferences.getString("inference_mode", InferenceMode.AUTO.name)!!)
         }.getOrDefault(InferenceMode.AUTO)
         val nativePlan = if (allowNative) native.resolve(goal) else null
-        if (nativePlan != null && mode != InferenceMode.CLOUD_FIRST) {
+        if (
+            nativePlan != null &&
+            (mode != InferenceMode.CLOUD_FIRST || learning.messagingDraft != null)
+        ) {
             val sourceScreen = service.snapshot()?.screenId ?: "*"
             events.onActing(nativePlan.message)
             executeActions(
@@ -269,7 +277,95 @@ class AgentCoordinator(
             events.onFailure("I cannot read the current screen yet. Open the target app and try again.")
             return
         }
-        if (mode != InferenceMode.CLOUD_FIRST) {
+        learning.messagingDraft?.let { draft ->
+            val continuation = messagingPickerContinuation(snapshot, draft)
+            if (continuation != null) {
+                val action = DeviceAction("click", target = continuation)
+                if (!confirmed) {
+                    pendingDeviceConfirmation = PendingDeviceConfirmation(
+                        goal = goal,
+                        actions = listOf(action),
+                        totalModelCalls = totalModelCalls,
+                        localPatternId = null,
+                        continueAfter = true,
+                        step = step,
+                        learning = learning,
+                        sourceScreen = snapshot.screenId,
+                        canonicalIntent = null,
+                        skillRef = "native:messaging.open_selected_draft",
+                        restorePreviousScreen = !events.assistantIsForeground(),
+                    )
+                    showDeviceConfirmation(
+                        goal,
+                        "${draft.recipient} is selected in WhatsApp's recipient picker. Continue to the " +
+                            "conversation and open the prepared draft? No message can be sent from this screen.",
+                        !events.assistantIsForeground(),
+                    )
+                } else {
+                    executeActions(
+                        service = service,
+                        actions = listOf(action),
+                        totalModelCalls = totalModelCalls,
+                        attemptId = null,
+                        client = null,
+                        localArtifact = null,
+                        localPatternId = null,
+                        goal = goal,
+                        continueAfter = true,
+                        step = step,
+                        learning = learning,
+                        sourceScreen = snapshot.screenId,
+                        canonicalIntent = null,
+                        skillRef = "native:messaging.open_selected_draft",
+                    )
+                }
+                return
+            }
+            val target = actionableTargetForLabel(snapshot, draft.recipient, "click")
+            if (target != null) {
+                val action = DeviceAction("click", target = target)
+                if (!confirmed) {
+                    pendingDeviceConfirmation = PendingDeviceConfirmation(
+                        goal = goal,
+                        actions = listOf(action),
+                        totalModelCalls = totalModelCalls,
+                        localPatternId = null,
+                        continueAfter = true,
+                        step = step,
+                        learning = learning,
+                        sourceScreen = snapshot.screenId,
+                        canonicalIntent = null,
+                        skillRef = "native:messaging.select_recipient",
+                        restorePreviousScreen = !events.assistantIsForeground(),
+                    )
+                    showDeviceConfirmation(
+                        goal,
+                        "WhatsApp shows exactly one contact named “${draft.recipient}”. " +
+                            "Select it to prepare the draft? Alfred will never press Send.",
+                        !events.assistantIsForeground(),
+                    )
+                } else {
+                    executeActions(
+                        service = service,
+                        actions = listOf(action),
+                        totalModelCalls = totalModelCalls,
+                        attemptId = null,
+                        client = null,
+                        localArtifact = null,
+                        localPatternId = null,
+                        goal = goal,
+                        continueAfter = true,
+                        step = step,
+                        learning = learning,
+                        sourceScreen = snapshot.screenId,
+                        canonicalIntent = null,
+                        skillRef = "native:messaging.select_recipient",
+                    )
+                }
+                return
+            }
+        }
+        if (mode != InferenceMode.CLOUD_FIRST && learning.messagingDraft == null) {
             learning.publicWorkflow?.let { cursor ->
                 val publicStep = githubSkills.nextWorkflowStep(cursor, snapshot.screenId)
                 if (publicStep != null) {
@@ -309,7 +405,7 @@ class AgentCoordinator(
                         snapshot.screenId,
                         workflowLocal.canonicalIntent,
                         "${WorkflowStore.PHONE_PREFIX}${workflowLocal.id}",
-                        false,
+                        !events.assistantIsForeground(),
                     )
                     showDeviceConfirmation(
                         goal,
@@ -352,7 +448,7 @@ class AgentCoordinator(
                         snapshot.screenId,
                         local.canonicalIntent,
                         "${WorkflowStore.PHONE_PREFIX}${local.id}",
-                        false,
+                        !events.assistantIsForeground(),
                     )
                     showDeviceConfirmation(
                         goal,
@@ -408,7 +504,7 @@ class AgentCoordinator(
                         snapshot.screenId,
                         null,
                         "github:${downloaded.id}",
-                        false,
+                        !events.assistantIsForeground(),
                     )
                     showDeviceConfirmation(
                         goal,
@@ -447,31 +543,41 @@ class AgentCoordinator(
         val profileId = preferences.getString("profile_id", null) ?: java.util.UUID.randomUUID()
             .toString()
             .also { preferences.edit().putString("profile_id", it).apply() }
+        val privateDraft = learning.messagingDraft
+        val plannerGoal = privateDraft?.plannerGoal() ?: goal
         val recentSummary = learning.workflow.trace.takeLast(5).joinToString(" → ") {
             "${it.canonicalIntent ?: it.actionKinds} (${it.sourceScreen} → ${it.destinationScreen})"
         }
-        val hints = (localCache.plannerHints(goal, snapshot.screenId, 3) +
-            githubSkills.plannerHints(goal, snapshot.screenId, 3)).distinct().take(5)
+        val hints = if (privateDraft == null) {
+            (localCache.plannerHints(goal, snapshot.screenId, 3) +
+                githubSkills.plannerHints(goal, snapshot.screenId, 3)).distinct().take(5)
+        } else {
+            emptyList()
+        }
         val client: PlanningClient = ClientPlanner(
             context = app,
             preferences = preferences,
             recentSummary = recentSummary,
             skillHints = hints,
         )
-        client.plan(goal, snapshot, confirmed, profileId) { result ->
+        client.plan(plannerGoal, snapshot, confirmed, profileId) { result ->
             main.post {
                 result.fold(
                     onSuccess = { plan ->
                         if (plan.confirmationRequired && !confirmed) {
                             pendingRemoteConfirmation = PendingRemoteConfirmation(
                                 goal = goal,
-                                plan = plan,
+                                plan = if (privateDraft == null) {
+                                    plan
+                                } else {
+                                    plan.copy(localArtifact = null)
+                                },
                                 client = client,
                                 totalModelCalls = totalModelCalls + plan.modelCalls,
                                 step = step,
                                 learning = learning,
                                 sourceScreen = snapshot.screenId,
-                                restorePreviousScreen = false,
+                                restorePreviousScreen = !events.assistantIsForeground(),
                             )
                             showRemoteConfirmation(
                                 goal,
@@ -495,7 +601,7 @@ class AgentCoordinator(
                                 totalModelCalls = totalModelCalls + plan.modelCalls,
                                 attemptId = plan.attemptId,
                                 client = client,
-                                localArtifact = plan.localArtifact,
+                                localArtifact = if (privateDraft == null) plan.localArtifact else null,
                                 localPatternId = null,
                                 goal = goal,
                                 continueAfter = !plan.terminal,
@@ -541,7 +647,7 @@ class AgentCoordinator(
                 sourceScreen,
                 workflowStep.cursor.workflowId,
                 skillRef,
-                false,
+                !events.assistantIsForeground(),
             )
             showDeviceConfirmation(
                 goal,
@@ -652,7 +758,23 @@ class AgentCoordinator(
                 events.onFailure("I could not restore the previous screen: ${outcome.message}")
                 return@execute
             }
-            main.postDelayed(execute, 250L)
+            main.postDelayed(
+                {
+                    if (pending.actions.all(service::canResolve)) {
+                        execute()
+                    } else {
+                        route(
+                            pending.goal,
+                            confirmed = false,
+                            step = pending.step,
+                            totalModelCalls = pending.totalModelCalls,
+                            allowNative = false,
+                            learning = pending.learning,
+                        )
+                    }
+                },
+                400L,
+            )
         }
     }
 
@@ -707,7 +829,23 @@ class AgentCoordinator(
                 events.onFailure("I could not restore the previous screen: ${outcome.message}")
                 return@execute
             }
-            main.postDelayed(execute, 250L)
+            main.postDelayed(
+                {
+                    if (pending.plan.actions.all(service::canResolve)) {
+                        execute()
+                    } else {
+                        route(
+                            pending.goal,
+                            confirmed = false,
+                            step = pending.step,
+                            totalModelCalls = pending.totalModelCalls,
+                            allowNative = false,
+                            learning = pending.learning,
+                        )
+                    }
+                },
+                400L,
+            )
         }
     }
 
@@ -764,29 +902,47 @@ class AgentCoordinator(
             val finish: (Boolean, Long?) -> Unit = { goalCompleted, learnedPatternId ->
                 val finalPatternId = learnedPatternId ?: resolvedPatternId
                 val destinationScreen = service.snapshot()?.screenId ?: sourceScreen
-                workflows.recordSuccess(
-                    session = learning.workflow,
-                    sourceScreen = sourceScreen,
-                    destinationScreen = destinationScreen,
-                    canonicalIntent = canonicalIntent,
-                    skillRef = finalPatternId?.let { "${WorkflowStore.PHONE_PREFIX}$it" } ?: skillRef,
-                    actions = actions,
-                    terminal = !continueAfter || goalCompleted,
-                )
-                if (continueAfter && !goalCompleted) {
-                    route(
-                        goal,
-                        confirmed = false,
-                        step = step + 1,
-                        totalModelCalls = totalModelCalls,
-                        allowNative = false,
-                        learning = learning,
+                val privateDraft = learning.messagingDraft
+                val draftVerified = privateDraft?.let(service::verifyMessagingDraft) == true
+                if (privateDraft == null) {
+                    workflows.recordSuccess(
+                        session = learning.workflow,
+                        sourceScreen = sourceScreen,
+                        destinationScreen = destinationScreen,
+                        canonicalIntent = canonicalIntent,
+                        skillRef = finalPatternId?.let { "${WorkflowStore.PHONE_PREFIX}$it" } ?: skillRef,
+                        actions = actions,
+                        terminal = !continueAfter || goalCompleted,
                     )
+                }
+                val needsMore = if (privateDraft != null) {
+                    !draftVerified
+                } else {
+                    continueAfter && !goalCompleted
+                }
+                if (needsMore) {
+                    val continueRouting = {
+                        route(
+                            goal,
+                            confirmed = false,
+                            step = step + 1,
+                            totalModelCalls = totalModelCalls,
+                            allowNative = false,
+                            learning = learning,
+                        )
+                    }
+                    if (privateDraft != null) {
+                        main.postDelayed(continueRouting, 700L)
+                    } else {
+                        continueRouting()
+                    }
                 } else {
                     finishWorkflow(learning, totalModelCalls, success = true)
                     val announceCompletion = {
                         events.onSuccess(
-                            if (totalModelCalls == 0) {
+                            if (privateDraft != null) {
+                                "Draft ready for ${privateDraft.recipient} — review it and press Send yourself"
+                            } else if (totalModelCalls == 0) {
                                 "Done — no LLM call needed"
                             } else {
                                 "Done — I'll reuse these verified steps next time"
@@ -847,6 +1003,53 @@ class AgentCoordinator(
         else -> "perform ${action.action.replace('_', ' ')}"
     }
 
+    private fun actionableTargetForLabel(
+        snapshot: SemanticSnapshot,
+        label: String,
+        action: String,
+    ): String? {
+        val byHandle = snapshot.nodes.associateBy { it.handle }
+        val targets = snapshot.nodes.asSequence()
+            .filter {
+                it.visible && it.enabled &&
+                    it.sensitivity !in setOf("secret", "excluded") &&
+                    it.label.equals(label, ignoreCase = true)
+            }
+            .mapNotNull { labeled ->
+                var candidate: SemanticNode? = labeled
+                while (candidate != null) {
+                    if (candidate.visible && candidate.enabled && action in candidate.actions) break
+                    candidate = candidate.parentHandle?.let(byHandle::get)
+                }
+                candidate
+            }
+            .distinctBy { it.handle }
+            .toList()
+        return targets.singleOrNull()?.handle
+    }
+
+    private fun messagingPickerContinuation(
+        snapshot: SemanticSnapshot,
+        draft: MessagingDraftIntent,
+    ): String? {
+        if (draft.channel != "whatsapp" || snapshot.packageName != draft.packageName) return null
+        val selectedRecipient = snapshot.nodes.any { node ->
+            node.visible && node.checked == true &&
+                node.label.startsWith(draft.recipient, ignoreCase = true)
+        }
+        val selectedCountVisible = snapshot.nodes.any { node ->
+            val label = node.label.lowercase()
+            node.visible && (
+                "selected" in label || "selezionato" in label || "selezionati" in label
+            )
+        }
+        if (!selectedRecipient || !selectedCountVisible) return null
+        return snapshot.nodes.singleOrNull { node ->
+            node.visible && node.enabled && "click" in node.actions &&
+                node.resourceId?.substringAfterLast('/') == "send"
+        }?.handle
+    }
+
     private fun saveLearnedArtifact(
         artifact: LocalCacheArtifact,
         learning: LearningSession,
@@ -873,6 +1076,7 @@ class AgentCoordinator(
         modelCalls: Int,
         success: Boolean,
     ) {
+        if (learning.messagingDraft != null) return
         workflows.finish(
             session = learning.workflow,
             goalTemplate = learning.goalTemplate,

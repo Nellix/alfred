@@ -53,27 +53,22 @@ class NativeIntentRouter(private val context: Context) {
                 return NativePlan(DeviceAction("launch_app", packageName = it), "Opening your inbox locally")
             }
         }
-        Regex(
-            "^(?:send|write) (?:a )?message (?:to ([^:]+?) )?(?:via|on) (telegram|whatsapp)(?:: (.+))?$",
-            RegexOption.IGNORE_CASE,
-        ).matchEntire(text)?.let { match ->
-            val recipient = match.groupValues[1].trim()
-            val channel = match.groupValues[2].lowercase()
-            val message = match.groupValues[3].trim()
-            val packageName = if (channel == "whatsapp") "com.whatsapp" else "org.telegram.messenger"
+        MessagingDraftIntent.parse(text)?.let { request ->
+            val packageName = request.packageName
             if (installed(packageName) == null) return null
-            val uri = if (channel == "whatsapp") {
-                "https://wa.me/?text=${encode(message)}"
+            val uri = if (request.channel == "whatsapp") {
+                "https://wa.me/?text=${encode(request.message)}"
             } else {
-                val username = recipient.removePrefix("@").takeIf {
+                val username = request.recipient.removePrefix("@").takeIf {
                     it.matches(Regex("[A-Za-z][A-Za-z0-9_]{4,31}"))
                 }
-                if (username != null) "https://t.me/$username?text=${encode(message)}"
-                else "https://t.me/share/url?url=&text=${encode(message)}"
+                if (username != null) "https://t.me/$username?text=${encode(request.message)}"
+                else "https://t.me/share/url?url=&text=${encode(request.message)}"
             }
             return NativePlan(
                 DeviceAction("open_deep_link", packageName = packageName, uri = uri),
                 "Preparing a draft locally — Alfred will never press Send",
+                terminal = false,
             )
         }
         return null

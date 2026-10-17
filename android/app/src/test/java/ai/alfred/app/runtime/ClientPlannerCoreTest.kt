@@ -132,6 +132,37 @@ class ClientPlannerCoreTest {
         assertEquals(semanticLocalMatchKey(base), semanticLocalMatchKey(providerVariant))
     }
 
+    @Test
+    fun visibleChildLabelResolvesToUniqueClickableParent() {
+        val parent = node(
+            handle = "contact-row",
+            label = null,
+            actions = listOf("click"),
+            clickable = true,
+        )
+        val child = node(
+            handle = "contact-name",
+            parentHandle = parent.handle,
+            label = "Mamma",
+            actions = emptyList(),
+        )
+
+        val result = ClientPlannerCore.validate(
+            goal = "Select the contact Mamma for an already prepared draft",
+            snapshot = snapshot(parent, child),
+            planned = PlannedStep(
+                canonicalIntent = "messaging.select_recipient",
+                confidence = 0.9,
+                parameters = emptyList(),
+                action = DeviceAction("click", target = child.handle),
+            ),
+            hasVerifiedHistory = false,
+        )
+
+        assertEquals(parent.handle, result.action.target)
+        assertTrue(result.confirmationRequired)
+    }
+
     private fun snapshot(vararg nodes: SemanticNode) = SemanticSnapshot(
         packageName = "com.example",
         screenId = "com.example:main",
@@ -157,13 +188,14 @@ class ClientPlannerCoreTest {
 
     private fun node(
         handle: String,
-        label: String,
+        label: String?,
         actions: List<String>,
+        parentHandle: String? = null,
         clickable: Boolean = false,
         editable: Boolean = false,
     ) = SemanticNode(
         handle = handle,
-        parentHandle = null,
+        parentHandle = parentHandle,
         packageName = "com.example",
         windowId = "1",
         resourceId = null,
